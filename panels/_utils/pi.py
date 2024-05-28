@@ -2,6 +2,7 @@ from panels._utils import ssh
 
 username = "pi"
 password = "hackerberry"
+domain = ".hackerspace.tbl"
 
 PI_TV_LIST = [
     "pi-tv1",

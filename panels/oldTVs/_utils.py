@@ -1,7 +1,7 @@
-from .._utils import utils
+from panels._utils import utils
 import win32net
 # from panels.User_Management import _utils as user_utils
-from .._utils.ssh import SSH
+from panels._utils.ssh import SSH
 
 mime_types = {
     ".png": "image/png",
@@ -14,8 +14,7 @@ mime_types = {
     ".webm": "video/webm",
     ".mkv": "video/x-matroska",
     ".svg": "image/svg+xml",
-    ".gif": "image/gif",
-    ".mkv": "video/x-matroska"
+    ".gif": "image/gif"
 }
 
 TV_FILE_SERVER = "hightower"

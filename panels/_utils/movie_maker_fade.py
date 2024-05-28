@@ -1,5 +1,6 @@
 import os
 import argparse
+from . import utils
 
 
 def movie_maker_fade(resolution='1920:1080', images_directory='images', seconds_per_image=8, fade_duration=1, color_space='yuv420p', output_file='/tmp/slideshow_fade.mp4'):
@@ -39,61 +40,33 @@ def movie_maker_fade(resolution='1920:1080', images_directory='images', seconds_
         return False
 
     num_images = len(image_files)
-
-    base_filter = "scale={}:force_original_aspect_ratio=decrease,pad={}:-1:-1,setsar=1,format=yuva444p".format(resolution, resolution)
-    image_inputs = ''
-    for image in image_files:
+    
+    image_inputs = ''    
+    for i in range(num_images):
         # '-loop 1 -t 5 -i images/input0.png' 
-        image_inputs += '-loop 1 -t {} -i {}{}{} '.format(seconds_per_image, images_directory, os.path.sep, image)
+        #image_inputs += f'-loop 1 -t {((seconds_per_image) * (num_images - i) + fade_duration) * 30 / 25 } -i {os.path.join(images_directory, image_files[i])} '
+        image_inputs += f'-loop 1 -i {os.path.join(images_directory, image_files[i])} '
 
+    base_filter = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={resolution}:-1:-1,setsar=1,format=yuva444p"
+    
     if num_images == 1:
-        pix_fmt = '-pix_fmt {}'.format(color_space)
-        cmd = 'ffmpeg {} {} -vf {} {}'.format(image_inputs, pix_fmt, base_filter, output_file)
+        cmd = f'{utils.FFMPEG} {image_inputs} -pix_fmt {color_space} -vf {base_filter} {output_file}'
     else:
         # Create transition filter
-        filter_complex = '-filter_complex "'
-        seconds = 0
-        for i in range(num_images):
-            # first image only fades out
-            if i == 0:
-                image_filter = "[{}]{}[bg];".format(
-                    i, 
-                    base_filter
-                )
-            else:
-                image_filter = "[{}]{},fade=d={}:t=in:alpha=1,setpts=PTS-STARTPTS+{}/TB[f{}];".format(
-                    i,
-                    base_filter,
-                    fade_duration,
-                    seconds,
-                    i - 1
-                )
+        filter_complex = f"[0]{base_filter},fade=t=in:d={fade_duration}[bg0];" # title card fades in from black
+        
+        seconds = seconds_per_image
+        for i in range(1, num_images):  # images after title card
+            filter_complex += f"[{i}]{base_filter},fade=t=in:alpha=1:d={fade_duration},setpts=PTS-STARTPTS+{seconds}/TB[f{i - 1}];"
             seconds += seconds_per_image
 
-            # Fade to black:
-            filter_complex += image_filter
+        overlays = ''
+        for i in range(num_images - 2):
+            # [bg][f0]overlay[bg1];[bg1][f1]overlay[bg2];[bg2][f2]overlay[bg3];[bg3][f3]overlay,format=yuv420p[bg4]
+            overlays += f"[bg{i}][f{i}]overlay[bg{i + 1}];"
+        overlays += f"[bg{num_images - 2}][f{num_images - 2}]overlay,format={color_space},fade=t=out:st={seconds}:d={fade_duration}[v]"
 
-        # overlays
-        for i in range(num_images - 1):
-            # [bg][f0]overlay[bg1];[bg1][f1]overlay[bg2];[bg2][f2]overlay[bg3];[bg3][f3]overlay
-            if i == 0:
-                bg = "bg"  
-            else:
-                bg = "bg{}".format(i)
-
-            filter_complex += "[{}][f{}]overlay".format(bg, i)
-
-            if i != num_images - 2:  # last one is different, if not last one then add this
-                filter_complex += "[bg{}];".format(i + 1)
-
-        filter_complex += ",format={}[v]".format(color_space)  # ...overlay,format=yuv420p[v]
-        filter_complex += '"'  # close quote for the filter complex
-
-        map_flag = '-map "[v]"'
-        mov_flags = '-movflags +faststart'
-
-        cmd = 'ffmpeg {} {} {} {} {}'.format(image_inputs, filter_complex, map_flag, mov_flags, output_file)
-
+        cmd = f'{utils.FFMPEG} -r 25 {image_inputs} -filter_complex "{filter_complex}{overlays}" -map "[v]" -movflags +faststart -t {seconds + fade_duration} {output_file}'
     print(cmd)
 
     os.system(cmd)

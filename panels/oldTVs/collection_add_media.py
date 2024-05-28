@@ -1,8 +1,8 @@
 import inquirer
 
-from panels.TVs.add_new_media import add_new_media
-from panels._utils.ssh import SSH
-from panels.TVs._utils import TV_FILE_SERVER, TV_FILE_SERVER_USER, TV_FILE_SERVER_PW
+from .add_new_media import add_new_media
+from .._utils.ssh import SSH
+from ._utils import TV_FILE_SERVER, TV_FILE_SERVER_USER, TV_FILE_SERVER_PW
 
 
 def collection_add_media():

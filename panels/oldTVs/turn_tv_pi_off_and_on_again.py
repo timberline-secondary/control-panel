@@ -1,5 +1,5 @@
-from .._utils.pi import reboot_pi
-from .._utils import utils
+from panels._utils.pi import reboot_pi
+from panels._utils import utils
 
 hostname = "pi-themes"
 

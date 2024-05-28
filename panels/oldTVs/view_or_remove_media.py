@@ -3,11 +3,11 @@ import subprocess
 
 import inquirer
 
-from panels.TVs.refresh_slideshow import refresh_slideshow
-from panels._utils import utils
-from panels._utils.ssh import SSH
+from .refresh_slideshow import refresh_slideshow
+from .._utils import utils
+from .._utils.ssh import SSH
 
-from panels.TVs._utils import get_tv_containing_student, TV_FILE_SERVER, TV_FILE_SERVER_USER, TV_FILE_SERVER_PW, TV_ROOT
+from ._utils import get_tv_containing_student, TV_FILE_SERVER, TV_FILE_SERVER_USER, TV_FILE_SERVER_PW, TV_ROOT
 
 
 def view_or_remove_media(username=None, tv=None):

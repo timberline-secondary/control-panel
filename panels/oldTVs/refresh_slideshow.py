@@ -1,8 +1,8 @@
 import os
-from panels._utils import utils
-from panels._utils.ssh import SSH
+from .._utils import utils
+from .._utils.ssh import SSH
 
-from panels.TVs._utils import TV_FILE_SERVER, TV_FILE_SERVER_PW, TV_FILE_SERVER_USER, TV_ROOT
+from ._utils import TV_FILE_SERVER, TV_FILE_SERVER_PW, TV_FILE_SERVER_USER, TV_ROOT
 
 
 def refresh_slideshow(username=None):

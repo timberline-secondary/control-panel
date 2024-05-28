@@ -1,7 +1,7 @@
 @echo off
 
 @REM this temporary until git is installed in the lab, also dependent on version number (app-3.3.6)
-SET git="C:\Users\%USERNAME%\AppData\Local\GithubDesktop\app-3.3.6\resources\app\git\cmd\git.exe"
+@SET git="C:\Users\%USERNAME%\AppData\Local\GithubDesktop\app-3.3.6\resources\app\git\cmd\git.exe"
 
 @REM @REM https://stackoverflow.com/a/8995407
 @REM NET SESSION >nul 2>&1

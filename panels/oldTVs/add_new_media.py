@@ -1,12 +1,12 @@
 import os
 from urllib.parse import urlparse
 
-from panels._utils import utils
-from panels._utils.ssh import SSH
+from .._utils import utils
+from .._utils.ssh import SSH
 
-from panels.TVs.refresh_slideshow import refresh_slideshow
+from .refresh_slideshow import refresh_slideshow
 
-from panels.TVs._utils import mime_types, guess_tv, TV_FILE_SERVER, TV_FILE_SERVER_USER, TV_FILE_SERVER_PW, TV_ROOT
+from ._utils import mime_types, guess_tv, TV_FILE_SERVER, TV_FILE_SERVER_USER, TV_FILE_SERVER_PW, TV_ROOT
 
 # this code worked on by Nicholas (Tseilorin) Hopkins
 

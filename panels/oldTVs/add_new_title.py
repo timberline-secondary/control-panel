@@ -1,9 +1,9 @@
 import os
 import inquirer
-from panels._utils import utils, pi
-from panels._utils.ssh import SSH
-from panels.User_Management import _utils as user_utils
-from panels.TVs.add_new_media import add_new_media, refresh_slideshow
+from .._utils import utils, pi
+from .._utils.ssh import SSH
+from ..User_Management import _utils as user_utils
+from .add_new_media import add_new_media, refresh_slideshow
 
 temp_dir = os.environ["TMP"]
 hostname = "hightower"
