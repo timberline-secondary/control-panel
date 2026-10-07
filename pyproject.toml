@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hackerspace-control-panel"
+dynamic = ["version"]
+description = "Control panel for the Timberline Hackerspace Raspberry Pis"
+readme = "README.md"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "keyring>=25",
+    "paramiko>=3.4",
+    "questionary>=2.0",
+]
+
+[project.scripts]
+control-panel = "control_panel.app:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+build = [
+    "pyinstaller>=6.10",
+]
+
+[tool.hatch.version]
+path = "src/control_panel/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/control_panel"]
+
+[tool.hatch.build.targets.sdist]
+# Keep the legacy app (and its 80 MB ffmpeg.exe) out of source builds.
+include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+extend-exclude = ["panels", "main.py"]  # legacy app, see README
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
