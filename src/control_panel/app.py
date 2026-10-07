@@ -11,7 +11,7 @@ from control_panel import __version__, config, ui
 from control_panel.panels import themes
 
 PANELS = [themes]
-NOT_PORTED_YET = ["TVs"]  # still in the legacy control panel (control-panel.bat)
+NOT_PORTED_YET = ["TVs"]  # from the legacy control panel (panels/TVs), not moved over yet
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,8 +49,7 @@ def _main_menu(settings: config.Config) -> None:
         ui.clear()
         ui.heading(f"Hackerspace Control Panel v{__version__}")
         choices = [ui.choice(panel.TITLE, panel) for panel in PANELS]
-        choices += [ui.choice(name, disabled="not moved over yet - use control-panel.bat")
-                    for name in NOT_PORTED_YET]
+        choices += [ui.choice(name, disabled="coming soon") for name in NOT_PORTED_YET]
         choices.append(ui.choice("Quit", ui.BACK))
         panel = ui.choose("Choose a panel", choices)
         if panel is None:
