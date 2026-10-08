@@ -31,7 +31,7 @@ collect it. That's expected after a Pi is re-installed; you'll be asked whether 
 | --- | --- |
 | Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. Shows what the Pi says back (found, not found, spam-blocked). It runs its own copy of the player, so spam-block and admin (`*`) codes here don't affect the keypad. Leaving stops anything still playing. |
 | Say something | Text to speech through the entrance speaker. |
-| Add a new theme | From a link to an mp3, or an mp3 file dragged into the window. Checks that it really is an mp3, suggests the code from the file name, and asks before replacing a theme. |
+| Add a new theme | From a link to an mp3, or an mp3 file dragged into the window. Checks that it really is an mp3, suggests the code from the file name. If the code is taken, you can replace that theme, pick another code, or cancel. |
 | List themes | Shows every theme code on the Pi's USB drive, in dictionary order (05111955 comes before 15111955 and 4261992). Then type part of a code to see only the codes that contain it. |
 | Mute / unmute | Sets the speaker to 0% or 100% (the speaker half of the old "grade 9 mode"; turning the TVs off will come with the TV tools). |
 | Reboot pi-themes | Turns it off and on again. |

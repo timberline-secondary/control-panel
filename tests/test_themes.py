@@ -320,3 +320,50 @@ def test_list_themes_then_search(monkeypatch):
         ("warning", "No codes contain '777'."),
     ]
     assert next(answers, "done") == "done"  # stopped asking after the Enter
+
+
+@pytest.fixture
+def add_screen(monkeypatch, tmp_path):
+    """Runs 'Add a new theme' with scripted answers. Returns (run, uploaded files, messages)."""
+    song = tmp_path / "0027.mp3"
+    song.write_bytes(ID3_MP3)
+    pi, connection = make_pi(files=["0027.mp3"])
+    messages = []
+    for kind in ["success", "info", "warning", "error"]:
+        monkeypatch.setattr(themes.ui, kind, lambda text, kind=kind: messages.append(text))
+
+    def run(asks, chooses=(), confirms=()):
+        asks, chooses, confirms = iter(asks), iter(chooses), iter(confirms)
+        monkeypatch.setattr(themes.ui, "ask", lambda prompt, **k: next(asks))
+        monkeypatch.setattr(themes.ui, "choose", lambda prompt, options: next(chooses))
+        monkeypatch.setattr(themes.ui, "confirm", lambda prompt, **k: next(confirms))
+        themes.add_theme(pi)
+        for left in (asks, chooses, confirms):  # every scripted answer was asked for
+            assert next(left, "done") == "done"
+
+    return run, str(song), connection.files, messages
+
+
+def test_add_theme_using_the_suggested_code(add_screen):
+    run, song, files, messages = add_screen
+    run(asks=[song, ""], chooses=["replace"], confirms=[False])  # Enter takes 0027
+    assert files["/mnt/usb0/0027.mp3"] == ID3_MP3
+
+
+def test_add_theme_with_a_different_code_after_a_clash(add_screen):
+    run, song, files, messages = add_screen
+    run(asks=[song, "", "0042"], chooses=["different"], confirms=[False])
+    assert files["/mnt/usb0/0042.mp3"] == ID3_MP3
+    assert files["/mnt/usb0/0027.mp3"] == b""  # untouched
+
+
+@pytest.mark.parametrize("asks, chooses", [
+    ([None], []),  # q (or Ctrl+C) at the link prompt
+    (["SONG", None], []),  # q at the code prompt
+    (["SONG", ""], [None]),  # Cancel (or Ctrl+C) when the code is taken
+    (["SONG", "", None], ["different"]),  # q when asked for a different code
+])
+def test_add_theme_can_always_be_left(add_screen, asks, chooses):
+    run, song, files, messages = add_screen
+    run(asks=[song if a == "SONG" else a for a in asks], chooses=chooses)
+    assert files == {"/mnt/usb0/0027.mp3": b""}

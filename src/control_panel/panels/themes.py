@@ -329,10 +329,18 @@ def add_theme(pi: ThemesPi) -> None:
             code = _ask_code(suggestion)
             if code is None:
                 return
-            if not pi.has_theme(code) or ui.confirm(
-                f"There's already a theme with code {code}. Replace it?", default=False
-            ):
+            if not pi.has_theme(code):
                 break
+            choice = ui.choose(f"There's already a theme with code {code}.", [
+                ui.choice("Replace it", "replace"),
+                ui.choice("Use a different code", "different"),
+                ui.choice("Cancel (don't add this theme)", ui.BACK),
+            ])
+            if choice is None:
+                return
+            if choice == "replace":
+                break
+            suggestion = None
 
         try:
             pi.add_theme(code, data)
@@ -348,10 +356,13 @@ def add_theme(pi: ThemesPi) -> None:
 
 
 def _ask_code(suggestion: str | None) -> str | None:
+    # Not pre-filled, so typing q to go back always works.
+    hint = f"(Enter for {suggestion}, q to go back)" if suggestion else ui.QUIT_HINT
     while True:
-        code = ui.ask("What code should play it?", default=suggestion or "")
+        code = ui.ask(f"What code should play it? {hint}")
         if code is None:
             return None
+        code = code or suggestion or ""
         if problem := code_problem(code):
             ui.error(problem)
             continue
