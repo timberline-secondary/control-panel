@@ -153,8 +153,14 @@ def parse_volume(amixer_output: str) -> int | None:
 
 
 def sort_codes(codes: Iterable[str]) -> list[str]:
-    """Numbers in number order first, then anything else alphabetically."""
-    return sorted(codes, key=lambda c: (not _is_number(c), int(c) if _is_number(c) else 0, c))
+    """Dictionary order, digit by digit, so leading zeros count: 05111955, 15111955, 4261992."""
+    return sorted(codes, key=lambda c: (c.casefold(), c))
+
+
+def search_codes(codes: list[str], text: str) -> list[str]:
+    """The codes containing text, ignoring case."""
+    text = text.casefold()
+    return [code for code in codes if text in code.casefold()]
 
 
 def columns(items: list[str], width: int = 78) -> str:
@@ -323,10 +329,18 @@ def add_theme(pi: ThemesPi) -> None:
             code = _ask_code(suggestion)
             if code is None:
                 return
-            if not pi.has_theme(code) or ui.confirm(
-                f"There's already a theme with code {code}. Replace it?", default=False
-            ):
+            if not pi.has_theme(code):
                 break
+            choice = ui.choose(f"There's already a theme with code {code}.", [
+                ui.choice("Replace it", "replace"),
+                ui.choice("Use a different code", "different"),
+                ui.choice("Cancel (don't add this theme)", ui.BACK),
+            ])
+            if choice is None:
+                return
+            if choice == "replace":
+                break
+            suggestion = None
 
         try:
             pi.add_theme(code, data)
@@ -342,10 +356,13 @@ def add_theme(pi: ThemesPi) -> None:
 
 
 def _ask_code(suggestion: str | None) -> str | None:
+    # Not pre-filled, so typing q to go back always works.
+    hint = f"(Enter for {suggestion}, q to go back)" if suggestion else ui.QUIT_HINT
     while True:
-        code = ui.ask("What code should play it?", default=suggestion or "")
+        code = ui.ask(f"What code should play it? {hint}")
         if code is None:
             return None
+        code = code or suggestion or ""
         if problem := code_problem(code):
             ui.error(problem)
             continue
@@ -363,6 +380,13 @@ def list_themes(pi: ThemesPi) -> None:
         return
     ui.success(f"{len(codes)} themes on pi-themes:")
     ui.info(columns(codes))
+    while text := ui.ask("Search for codes containing (or just press Enter to go back)"):
+        matches = search_codes(codes, text)
+        if matches:
+            ui.success(f"{len(matches)} of {len(codes)} codes contain '{text}':")
+            ui.info(columns(matches))
+        else:
+            ui.warning(f"No codes contain '{text}'.")
 
 
 def mute_or_unmute(pi: ThemesPi) -> None:
