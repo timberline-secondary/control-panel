@@ -12,8 +12,11 @@ Control the Timberline Hackerspace Raspberry Pis from a lab computer.
 2. Double-click it. If Windows says *"Windows protected your PC"*, click
    **More info → Run anyway** (the app isn't code-signed).
 
-There's nothing else to install: no Python, git, or packages. To update, download the
-new version.
+There's nothing else to install: no Python, git, or packages.
+
+**Updates:** when a new version is out, the app offers to update itself when it starts. Say
+yes and it downloads the new version, swaps it in and restarts. (You can also run
+`control-panel --update` from a terminal.)
 
 ## Using it
 
@@ -83,6 +86,7 @@ uv run ruff check src tests   # lint
 | `src/control_panel/login.py` | Passwords: config file, then Windows Credential Manager, then ask. |
 | `src/control_panel/config.py` | Settings and their defaults. |
 | `src/control_panel/ui.py` | Menus, prompts and coloured messages (questionary). |
+| `src/control_panel/updater.py` | Checking GitHub for a new release and swapping the exe for it. |
 
 To add a panel, create `src/control_panel/panels/<name>.py` with a `TITLE` and a
 `run(config)` function, and add it to `PANELS` in `app.py`. Keep the Pi-talking parts
@@ -90,8 +94,8 @@ free of prompts (like `ThemesPi` in `themes.py`) so they're easy to test.
 
 **Releasing:** CI builds `control-panel.exe` on every push; download it from the run's
 artifacts on the Actions tab to try it. To publish a release, bump `__version__` in
-`src/control_panel/__init__.py`, then push a matching tag (e.g. `v0.2.0`). CI attaches the
-exe to a new GitHub release.
+`src/control_panel/__init__.py`, then push a matching tag (e.g. `v0.3.0`). CI attaches the
+exe to a new GitHub release, and everyone's app offers it the next time they open it.
 
 ## Legacy control panel
 

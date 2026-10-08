@@ -70,6 +70,14 @@ def confirm(prompt: str, default: bool = True) -> bool:
     return bool(_answer(questionary.confirm(prompt, default=default, qmark="?", style=STYLE)))
 
 
+def pause(prompt: str = "Press Enter to carry on.") -> None:
+    """Wait for Enter, e.g. so a message can be read before the screen is cleared."""
+    try:
+        input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 BACK = object()  # value of a menu's "Back"/"Quit" choice
 
 
