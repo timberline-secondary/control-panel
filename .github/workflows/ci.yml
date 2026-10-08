@@ -43,6 +43,8 @@ jobs:
         run: uv run pyinstaller --onefile --name control-panel packaging/control-panel.py
       - name: Check that it starts
         run: ./dist/control-panel.exe --version
+      - name: Check that it can update itself
+        run: uv run python packaging/check_update.py dist/control-panel.exe
       - uses: actions/upload-artifact@v4
         with:
           name: control-panel-windows
