@@ -1,6 +1,6 @@
 """Logging in to a Pi: find the password, connect, and remember it if asked to.
 
-Passwords are never stored in this repository. They come from (in order) the
+This app doesn't keep passwords in its code. They come from (in order) the
 config file, this run's memory, the OS keychain (Windows Credential Manager on
 the lab computers), or by asking.
 """
@@ -9,46 +9,83 @@ from __future__ import annotations
 
 import keyring
 
-from control_panel import ui
+from control_panel import config, ui
 from control_panel.config import PiSettings
-from control_panel.ssh import AuthenticationFailed, ConnectionFailed, PiConnection
+from control_panel.ssh import (
+    AuthenticationFailed,
+    ConnectionFailed,
+    HostKeyChanged,
+    PiConnection,
+    forget_host_key,
+)
 
 KEYRING_SERVICE = "hackerspace-control-panel"
-MAX_TRIES = 3
+MAX_TYPED_TRIES = 3
 
 _remembered_this_run: dict[str, str] = {}
+_rejected_this_run: set[tuple[str, str]] = set()  # (account, password) the Pi said no to
 
 
 def connect(settings: PiSettings) -> PiConnection | None:
     """Open a connection, asking for the password if needed. None if they cancel."""
     account = f"{settings.username}@{settings.host}"
-    password = settings.password or _remembered_this_run.get(account) or _load(account)
+    saved = [
+        (settings.password, "config"),
+        (_remembered_this_run.get(account), "memory"),
+        (_load(account), "keychain"),
+    ]
+    typed_tries = 0
 
-    for _ in range(MAX_TRIES):
-        typed = password is None
-        if typed:
+    while True:
+        # Try each saved password once per run, then ask.
+        password, source = next(
+            ((pw, src) for pw, src in saved if pw and (account, pw) not in _rejected_this_run),
+            (None, "typed"),
+        )
+        if password is None:
+            if typed_tries == MAX_TYPED_TRIES:
+                raise ConnectionFailed(f"Couldn't log in to {settings.host}.")
             password = ui.ask_password(f"Password for {account}:")
             if password is None:
                 return None
-        ui.info(f"Connecting to {settings.host}...")
+            typed_tries += 1
+
         try:
-            connection = PiConnection(settings.host, settings.username, password,
-                                      port=settings.port)
+            connection = _open(settings, password)
         except AuthenticationFailed as e:
-            ui.error(str(e))
-            _remembered_this_run.pop(account, None)
-            _forget(account)
-            password = None
+            _rejected_this_run.add((account, password))
+            ui.error(f"{e} (It's the one in the config file.)" if source == "config" else str(e))
+            if source == "keychain":
+                _forget(account)
             continue
+        if connection is None:
+            return None
 
         _remembered_this_run[account] = password
-        if typed and _keychain_available() and ui.confirm(
-            "Remember this password on this computer?", default=True
+        if source == "typed" and _keychain_available() and ui.confirm(
+            "Remember this password? (Only on your own Windows login, not a shared one.)",
+            default=False,
         ):
             _save(account, password)
         return connection
 
-    raise ConnectionFailed(f"Couldn't log in to {settings.host}.")
+
+def _open(settings: PiSettings, password: str) -> PiConnection | None:
+    """Connect, asking whether to trust the Pi if its identity has changed."""
+    ui.info(f"Connecting to {settings.host}...")
+    known_hosts = config.known_hosts_path()
+    try:
+        return PiConnection(settings.host, settings.username, password, port=settings.port,
+                            known_hosts=known_hosts)
+    except HostKeyChanged as e:
+        ui.warning(str(e))
+        if not ui.confirm(f"Was {settings.host} just re-installed? Trust it from now on?",
+                          default=False):
+            return None
+    forget_host_key(known_hosts, settings.host, settings.port)
+    ui.info(f"Connecting to {settings.host}...")
+    return PiConnection(settings.host, settings.username, password, port=settings.port,
+                        known_hosts=known_hosts)
 
 
 # The keychain is a convenience: if there isn't one (e.g. a headless Linux box),

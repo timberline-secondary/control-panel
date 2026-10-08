@@ -9,6 +9,7 @@ to change.
 from __future__ import annotations
 
 import codecs
+import http.client
 import io
 import posixpath
 import re
@@ -55,7 +56,11 @@ def looks_like_mp3(data: bytes) -> bool:
 def suggest_code(filename: str) -> str | None:
     """'0027.mp3' -> '0027'. Files named after their code are the usual case."""
     stem = posixpath.splitext(filename)[0]
-    return stem if stem.isdigit() else None
+    return stem if _is_number(stem) else None
+
+
+def _is_number(text: str) -> bool:
+    return text.isascii() and text.isdigit()  # isdigit() alone accepts things like '²'
 
 
 def code_problem(code: str) -> str | None:
@@ -74,6 +79,8 @@ def code_problem(code: str) -> str | None:
 def clean_source(text: str) -> str:
     """Tidy a pasted link or dragged-in file path (Windows wraps paths in quotes)."""
     text = text.strip()
+    if len(text) > 3 and text.startswith("& '") and text.endswith("'"):
+        return text[3:-1].replace("''", "'")  # how VS Code's PowerShell terminal drops paths
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         text = text[1:-1].strip()
     return text
@@ -81,6 +88,9 @@ def clean_source(text: str) -> str:
 
 def read_mp3(source: str) -> tuple[str, bytes]:
     """Get an mp3 from a link or a file on this computer. Returns (file name, contents)."""
+    if source.startswith(("\\\\", "//")) or source.lower().startswith("file:"):
+        # Opening \\server\share paths makes Windows log in to that server as you.
+        raise ThemeError("Use a web link, or an mp3 file on this computer.")
     if source.lower().startswith(("http://", "https://")):
         url_path = urllib.parse.unquote(urllib.parse.urlparse(source).path)
         name = posixpath.basename(url_path) or "the download"
@@ -93,9 +103,12 @@ def read_mp3(source: str) -> tuple[str, bytes]:
         path = Path(source).expanduser()
         if not path.is_file():
             raise ThemeError(f"Couldn't find the file {source}")
-        if path.stat().st_size > MAX_MP3_BYTES:
-            raise ThemeError("That file is too big for a theme (over 50 MB).")
-        name, data = path.name, path.read_bytes()
+        try:
+            if path.stat().st_size > MAX_MP3_BYTES:
+                raise ThemeError("That file is too big for a theme (over 50 MB).")
+            name, data = path.name, path.read_bytes()
+        except OSError as e:
+            raise ThemeError(f"Couldn't read {source}: {e.strerror or e}") from e
         not_mp3 = f"{name} isn't an mp3 file. Only mp3s can be themes."
     if not looks_like_mp3(data):
         raise ThemeError(not_mp3)
@@ -110,12 +123,17 @@ def _download(url: str) -> tuple[bytes, str]:
         with urllib.request.urlopen(request, timeout=30) as response:
             data = response.read(MAX_MP3_BYTES + 1)
             content_type = response.headers.get_content_type()
+            bytes_missing = response.length  # still owed by Content-Length, if it gave one
     except urllib.error.HTTPError as e:
         raise ThemeError(f"The link didn't work (error {e.code}: {e.reason}).") from e
+    except http.client.HTTPException as e:
+        raise ThemeError("Couldn't download that link (the reply was broken or cut off).") from e
     except (OSError, ValueError) as e:
         raise ThemeError(f"Couldn't download that link: {getattr(e, 'reason', e)}") from e
     if len(data) > MAX_MP3_BYTES:
         raise ThemeError("That file is too big for a theme (over 50 MB).")
+    if bytes_missing:
+        raise ThemeError("The download was cut off part way. Try again.")
     return data, content_type
 
 
@@ -136,7 +154,7 @@ def parse_volume(amixer_output: str) -> int | None:
 
 def sort_codes(codes: Iterable[str]) -> list[str]:
     """Numbers in number order first, then anything else alphabetically."""
-    return sorted(codes, key=lambda c: (not c.isdigit(), int(c) if c.isdigit() else 0, c))
+    return sorted(codes, key=lambda c: (not _is_number(c), int(c) if _is_number(c) else 0, c))
 
 
 def columns(items: list[str], width: int = 78) -> str:
@@ -175,7 +193,10 @@ class ThemesPi:
         self.connection.upload(io.BytesIO(data), self.theme_path(code))
 
     def speak(self, text: str) -> CommandResult:
-        return self.connection.run(f"espeak -a 200 {shlex.quote(text)} 2>/dev/null")
+        # "--" so text starting with "-" is spoken, not read as espeak options.
+        # espeak only finishes once it's done talking, hence the long timeout.
+        return self.connection.run(f"espeak -a 200 -- {shlex.quote(text)} 2>/dev/null",
+                                   timeout=600)
 
     def volume(self) -> int | None:
         result = self.connection.run(f"amixer sget {self._mixer}")
@@ -259,7 +280,9 @@ def play(pi: ThemesPi) -> None:
             ui.error("The theme player on pi-themes didn't start (see above).")
             return
         ui.success("Ready! Type a theme code and press Enter to play it on the entrance speaker.")
-        ui.info("Leaving this screen stops anything that's still playing.")
+        ui.info("This screen runs its own copy of the player, so its spam-block and admin (*) "
+                "codes don't affect the keypad.\n"
+                "Leaving this screen stops anything that's still playing.")
         while not session.ended.is_set():
             code = ui.ask(f"Theme code {ui.QUIT_HINT}", patch_stdout=True)
             if code is None or code.lower() == "exit":
@@ -310,7 +333,10 @@ def add_theme(pi: ThemesPi) -> None:
         except OSError as e:
             ui.error(f"Couldn't save it on pi-themes: {e}")
             return
-        ui.success(f"Added! Type {code} on the entrance keypad to play it.")
+        if _is_number(code):
+            ui.success(f"Added! Type {code} on the entrance keypad to play it.")
+        else:
+            ui.success(f"Added! Play it by typing {code} in 'Play a theme'.")
         if not ui.confirm("Add another theme?", default=True):
             return
 
@@ -323,7 +349,7 @@ def _ask_code(suggestion: str | None) -> str | None:
         if problem := code_problem(code):
             ui.error(problem)
             continue
-        if code.isdigit() or ui.confirm(
+        if _is_number(code) or ui.confirm(
             f"'{code}' can't be typed on the entrance keypad (it only has numbers). "
             "Use it anyway?", default=False
         ):
@@ -396,6 +422,9 @@ def run(config: Config) -> None:
                 action(ThemesPi(connection, settings))
         except (ConnectionFailed, ThemeError) as e:
             ui.error(str(e))
+        except TimeoutError:
+            ui.error(f"{settings.host} stopped answering. Try again, or reboot it if it keeps "
+                     "happening.")
         except (OSError, paramiko.SSHException) as e:
             ui.error(f"Lost the connection to {settings.host}: {e}")
         except KeyboardInterrupt:

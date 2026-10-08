@@ -3,8 +3,7 @@
 Control the Timberline Hackerspace Raspberry Pis from a lab computer.
 
 > **Status:** this is a rewrite in progress. The new app does the **entrance themes**
-> (pi-themes). The **TV** tools are still in the [legacy control panel](#legacy-control-panel-tvs)
-> until they're moved over.
+> (pi-themes). The **TV** tools are next.
 
 ## Install (Windows)
 
@@ -19,18 +18,22 @@ new version.
 ## Using it
 
 Pick a panel with the arrow keys (or its number) and press Enter. The first time you
-connect to a Pi you'll be asked for its password, and you can choose to have Windows
-remember it (in Windows Credential Manager). Passwords are never stored in this repo.
+connect to a Pi you'll be asked for its password. If you're on your own Windows login (not a
+shared one), you can have Windows remember it in Credential Manager.
+
+The app also remembers each Pi's identity the first time it connects. If that ever changes,
+it warns you before sending the password, so another computer can't pretend to be a Pi to
+collect it. That's expected after a Pi is re-installed; you'll be asked whether to trust it.
 
 ### Entrance themes (pi-themes)
 
 | Menu item | What it does |
 | --- | --- |
-| Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. Shows what the Pi says back (found, not found, spam-blocked). Leaving stops anything still playing. |
+| Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. Shows what the Pi says back (found, not found, spam-blocked). It runs its own copy of the player, so spam-block and admin (`*`) codes here don't affect the keypad. Leaving stops anything still playing. |
 | Say something | Text to speech through the entrance speaker. |
 | Add a new theme | From a link to an mp3, or an mp3 file dragged into the window. Checks that it really is an mp3, suggests the code from the file name, and asks before replacing a theme. |
 | List themes | Shows every theme code on the Pi's USB drive. |
-| Mute / unmute | Sets the speaker to 0% or 100% (what "grade 9 mode" used to do). |
+| Mute / unmute | Sets the speaker to 0% or 100% (the speaker half of the old "grade 9 mode"; turning the TVs off will come with the TV tools). |
 | Reboot pi-themes | Turns it off and on again. |
 
 The player that runs on the Pi is [timberline-secondary/themes](https://github.com/timberline-secondary/themes).
@@ -58,6 +61,8 @@ songs_dir = "/mnt/usb0"             # must match THEME_PATH in the player's .env
 python = "python"
 mixer_control = "Headphone"         # amixer control used to mute/unmute
 ```
+
+The Pis' remembered identities are kept in a `known_hosts` file in the same folder.
 
 ## For developers
 
@@ -88,43 +93,13 @@ artifacts on the Actions tab to try it. To publish a release, bump `__version__`
 `src/control_panel/__init__.py`, then push a matching tag (e.g. `v0.2.0`). CI attaches the
 exe to a new GitHub release.
 
-## Legacy control panel (TVs)
+## Legacy control panel
 
-The previous Windows control panel is still here (`main.py`, `panels/`, `control-panel.bat`)
-for the TV tools until they're moved into the new app.
+The previous Windows control panel (`main.py`, `panels/`, `*.bat`, `bin/`) isn't used any more.
+It's kept for reference until its TV tools are moved into the new app, then it can go.
 
-Because of changes in our network, the version before that stopped working. It relied on a
-smb server that the individual Raspberry Pis would query on start-up. They stopped being able
-to show anything if not connected to the network.
-
-The Raspberry Pis have now been configured to not check for new material. Instead, the
-control panel code pushes new material to the directory on the Pi where the mp4 files are
-stored.
-
-The material needs to be manually saved to the Hackerspace Teams team by the user for
-long-term storage. Automating this process will open too many security holes.
-
-All the processing is done on the user's computer, rather than on a remote server.
-
-The user needs to install
-
-- git
-- ffmpeg
-- Inkscape
-- python 3.11 to install Pillow
-- Ubuntu fonts available through Google Fonts: https://fonts.google.com/specimen/Ubuntu
-
-### Installation
-
-To install the legacy control-panel you can run one of the following commands which clones
-this repository into a .bin folder under C:\Users\YourName. If it doesn't work for you, you
-can clone this folder to wherever you like using git or GitHub Desktop.
-
-To run the control-panel, navigate to the control-panel folder and double-click
-control-panel.bat.
-
-`curl -o %TMP%\ctrlp.bat https://raw.githubusercontent.com/timberline-secondary/control-panel/main/install.bat && call %TMP%\ctrlp.bat`
-
-OR
-
-`curl -L -o %TMP%\ctrlp.bat https://cmdf.at/ctrlp && call %TMP%\ctrlp.bat`
+Notes from it for the TV tools: the TV Pis don't fetch anything at start-up any more (they used
+to query an SMB server, which stopped working after network changes). Instead, the control panel
+makes the mp4s on the user's computer and pushes them to the folder on each Pi where they're
+stored. Users save the material to the Hackerspace Teams team themselves for long-term storage;
+automating that would open too many security holes.

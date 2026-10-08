@@ -55,22 +55,19 @@ def _print(text: str, style: str = "") -> None:
 
 def ask(prompt: str, default: str = "", *, patch_stdout: bool = False) -> str | None:
     """Ask for some text. Returns None if they typed q or pressed Ctrl+C."""
-    answer = questionary.text(prompt, default=default, qmark=">", style=STYLE).ask(
-        patch_stdout=patch_stdout, kbi_msg=""
-    )
+    answer = _answer(questionary.text(prompt, default=default, qmark=">", style=STYLE),
+                     patch_stdout=patch_stdout)
     if answer is None or answer.strip().lower() == "q":
         return None
     return answer.strip()
 
 
 def ask_password(prompt: str) -> str | None:
-    return questionary.password(prompt, qmark=">", style=STYLE).ask(kbi_msg="")
+    return _answer(questionary.password(prompt, qmark=">", style=STYLE))
 
 
 def confirm(prompt: str, default: bool = True) -> bool:
-    return bool(questionary.confirm(prompt, default=default, qmark="?", style=STYLE).ask(
-        kbi_msg=""
-    ))
+    return bool(_answer(questionary.confirm(prompt, default=default, qmark="?", style=STYLE)))
 
 
 BACK = object()  # value of a menu's "Back"/"Quit" choice
@@ -78,11 +75,19 @@ BACK = object()  # value of a menu's "Back"/"Quit" choice
 
 def choose(prompt: str, choices: list[questionary.Choice | str]) -> Any:
     """Arrow keys or number keys to pick. Returns None for BACK or Ctrl+C."""
-    answer = questionary.select(
+    answer = _answer(questionary.select(
         prompt, choices=choices, qmark="?", style=STYLE, use_shortcuts=True,
         instruction="(use arrow keys or numbers)",
-    ).ask(kbi_msg="")
+    ))
     return None if answer is BACK else answer
+
+
+def _answer(question: questionary.Question, patch_stdout: bool = False) -> Any:
+    """None if they press Ctrl+C, or Ctrl+D on an empty line (which raises EOFError)."""
+    try:
+        return question.ask(patch_stdout=patch_stdout, kbi_msg="")
+    except EOFError:
+        return None
 
 
 def choice(title: str, value: Any = None, disabled: str | None = None) -> questionary.Choice:

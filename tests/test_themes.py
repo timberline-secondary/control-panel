@@ -1,4 +1,7 @@
 import queue
+import socket
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +31,7 @@ def test_looks_like_mp3(data, expected):
     ("1234", "1234"),
     ("my song.mp3", None),
     ("12a.mp3", None),
+    ("\u00b2.mp3", None),  # '²'.isdigit() is True, but it's not a code
 ])
 def test_suggest_code(name, expected):
     assert themes.suggest_code(name) == expected
@@ -45,6 +49,8 @@ def test_code_problem(code, ok):
 @pytest.mark.parametrize("text, expected", [
     ('  "C:\\Users\\me\\My Music\\theme.mp3" ', "C:\\Users\\me\\My Music\\theme.mp3"),
     ("'/home/me/theme.mp3'", "/home/me/theme.mp3"),
+    ("& 'C:\\Users\\me\\My Music\\theme.mp3'", "C:\\Users\\me\\My Music\\theme.mp3"),  # VS Code
+    ("& 'C:\\Music\\Rock ''n'' Roll.mp3'", "C:\\Music\\Rock 'n' Roll.mp3"),
     ("https://example.com/a.mp3", "https://example.com/a.mp3"),
     ('"', '"'),
 ])
@@ -65,6 +71,66 @@ def test_read_mp3_rejects_other_files(tmp_path):
         themes.read_mp3(str(page))
     with pytest.raises(ThemeError, match="Couldn't find"):
         themes.read_mp3(str(tmp_path / "missing.mp3"))
+
+
+@pytest.mark.parametrize("source", [
+    "\\\\10.0.0.9\\share\\0042.mp3", "//10.0.0.9/share/0042.mp3", "file:///C:/music/0042.mp3",
+])
+def test_read_mp3_refuses_network_shares(source):
+    with pytest.raises(ThemeError, match="web link"):
+        themes.read_mp3(source)
+
+
+def test_read_mp3_unreadable_file(tmp_path, monkeypatch):
+    song = tmp_path / "0042.mp3"
+    song.write_bytes(ID3_MP3)
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(
+        PermissionError(13, "Permission denied")))
+    with pytest.raises(ThemeError, match="Couldn't read .*Permission denied"):
+        themes.read_mp3(str(song))
+
+
+@pytest.fixture
+def web_server():
+    """A one-shot web server that sends whatever raw bytes the test gives it."""
+    servers = []
+
+    def serve(reply: bytes) -> str:
+        sock = socket.create_server(("127.0.0.1", 0))
+        servers.append(sock)
+
+        def answer():
+            client, _ = sock.accept()
+            with client:
+                client.recv(65536)
+                client.sendall(reply)
+                client.shutdown(socket.SHUT_WR)
+
+        threading.Thread(target=answer, daemon=True).start()
+        return f"http://127.0.0.1:{sock.getsockname()[1]}/0042.mp3"
+
+    yield serve
+    for sock in servers:
+        sock.close()
+
+
+def test_download_ok(web_server):
+    url = web_server(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: %d\r\n"
+                     b"Connection: close\r\n\r\n%s" % (len(FRAME_MP3), FRAME_MP3))
+    assert themes.read_mp3(url) == ("0042.mp3", FRAME_MP3)
+
+
+@pytest.mark.parametrize("reply, message", [
+    (b"SSH-2.0-OpenSSH_9.6\r\n", "broken or cut off"),  # not a web server at all
+    (b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n" + FRAME_MP3,
+     "cut off part way"),
+    (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n" + FRAME_MP3,
+     "broken or cut off"),
+    (b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", "error 404"),
+])
+def test_download_problems_are_explained(web_server, reply, message):
+    with pytest.raises(ThemeError, match=message):
+        themes.read_mp3(web_server(reply))
 
 
 def test_read_mp3_from_link(monkeypatch):
@@ -99,6 +165,7 @@ def test_parse_volume():
 def test_sort_codes_and_columns():
     codes = themes.sort_codes(["100", "abc", "0027", "9"])
     assert codes == ["9", "0027", "100", "abc"]
+    assert themes.sort_codes(["\u00b2", "1"]) == ["1", "\u00b2"]
     assert themes.columns(codes, width=12) == "9     0027\n100   abc"
 
 
@@ -108,7 +175,7 @@ class FakeConnection:
         self.commands = []
         self.result = CommandResult(exit_status, output)
 
-    def run(self, command, *, sudo=False):
+    def run(self, command, *, sudo=False, timeout=60):
         self.commands.append((command, sudo))
         return self.result
 
@@ -154,7 +221,11 @@ def test_add_and_find_theme():
 def test_speak_quotes_text_for_the_shell():
     pi, connection = make_pi()
     pi.speak("it's $(rm -rf ~)")
-    assert connection.commands == [("espeak -a 200 'it'\"'\"'s $(rm -rf ~)' 2>/dev/null", False)]
+    assert connection.commands == [
+        ("espeak -a 200 -- 'it'\"'\"'s $(rm -rf ~)' 2>/dev/null", False)
+    ]
+    pi.speak("-5 minutes to the bell")  # not read as espeak options
+    assert connection.commands[-1][0].startswith("espeak -a 200 -- '-5 minutes")
 
 
 def test_volume_commands():

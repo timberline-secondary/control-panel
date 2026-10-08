@@ -63,14 +63,26 @@ def path() -> Path:
     return Path(override) if override else default_path()
 
 
+def known_hosts_path() -> Path:
+    """Where each Pi's identity (SSH host key) is remembered."""
+    return default_path().parent / "known_hosts"
+
+
 def load(config_path: Path | None = None) -> Config:
+    """config_path: a file the person chose (--config); otherwise see path()."""
+    chosen = config_path is not None or bool(os.environ.get(CONFIG_ENV_VAR))
     config_path = config_path or path()
     if not config_path.exists():
+        if chosen:  # a typo here shouldn't quietly fall back to the real Pis
+            raise ConfigError(f"Couldn't find the config file {config_path}")
         return Config()
     try:
-        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        data = tomllib.loads(_decode(config_path.read_bytes()))
+    except (OSError, tomllib.TOMLDecodeError) as e:
         raise ConfigError(f"Couldn't read the config file {config_path}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise ConfigError(f"Couldn't read the config file {config_path}: "
+                          "save it as UTF-8 text and try again.") from e
 
     unknown = set(data) - {f.name for f in fields(Config)}
     if unknown:
@@ -95,4 +107,14 @@ def _section(cls, values, name: str, config_path: Path):
                 f"Setting '{key}' in [{name}] of {config_path} should be "
                 f"{'a whole number' if expected is int else 'text in quotes'}"
             )
+        if key == "port" and not 1 <= value <= 65535:
+            raise ConfigError(f"Setting 'port' in [{name}] of {config_path} should be "
+                              "between 1 and 65535")
     return cls(**values)
+
+
+def _decode(raw: bytes) -> str:
+    # Notepad can save UTF-8 with a BOM, and Windows PowerShell's > and Out-File write UTF-16.
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    return raw.decode("utf-8-sig")
