@@ -162,11 +162,24 @@ def test_parse_volume():
     assert themes.parse_volume("nothing here") is None
 
 
-def test_sort_codes_and_columns():
-    codes = themes.sort_codes(["100", "abc", "0027", "9"])
-    assert codes == ["9", "0027", "100", "abc"]
-    assert themes.sort_codes(["\u00b2", "1"]) == ["1", "\u00b2"]
-    assert themes.columns(codes, width=12) == "9     0027\n100   abc"
+def test_sort_codes_digit_by_digit():
+    # Leading zeros count, like words in a dictionary.
+    assert themes.sort_codes(["4261992", "15111955", "05111955"]) == [
+        "05111955", "15111955", "4261992"]
+    assert themes.sort_codes(["100", "abc", "0027", "9", "Abd"]) == [
+        "0027", "100", "9", "abc", "Abd"]
+
+
+def test_search_codes():
+    codes = ["05111955", "15111955", "4261992", "Intro"]
+    assert themes.search_codes(codes, "1955") == ["05111955", "15111955"]
+    assert themes.search_codes(codes, "05") == ["05111955"]
+    assert themes.search_codes(codes, "intro") == ["Intro"]
+    assert themes.search_codes(codes, "777") == []
+
+
+def test_columns():
+    assert themes.columns(["0027", "100", "9", "abc"], width=12) == "0027  100\n9     abc"
 
 
 class FakeConnection:
@@ -287,3 +300,23 @@ def test_player_session_that_fails_to_start():
     channel.incoming.put(b"")
     assert session.ready.wait(5) and session.ended.wait(5)
     assert shown == ["bash: python: command not found"]
+
+
+def test_list_themes_then_search(monkeypatch):
+    pi, _ = make_pi(files=["4261992.mp3", "15111955.mp3", "05111955.mp3"])
+    shown = []
+    for kind in ["success", "info", "warning"]:
+        monkeypatch.setattr(themes.ui, kind, lambda text, kind=kind: shown.append((kind, text)))
+    answers = iter(["1955", "777", ""])  # Enter on its own goes back
+    monkeypatch.setattr(themes.ui, "ask", lambda *a, **k: next(answers))
+
+    themes.list_themes(pi)
+
+    assert shown == [
+        ("success", "3 themes on pi-themes:"),
+        ("info", "05111955  15111955  4261992"),
+        ("success", "2 of 3 codes contain '1955':"),
+        ("info", "05111955  15111955"),
+        ("warning", "No codes contain '777'."),
+    ]
+    assert next(answers, "done") == "done"  # stopped asking after the Enter
