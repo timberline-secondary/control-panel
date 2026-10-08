@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.request
@@ -30,6 +31,7 @@ LATEST_RELEASE_API = (
 )
 URL_ENV_VAR = "CONTROL_PANEL_UPDATE_URL"  # to test against a local server instead of GitHub
 ASSET_NAME = "control-panel.exe"
+ERROR_SHARING_VIOLATION = 32  # Windows: the file is open somewhere that doesn't allow this
 _HEADERS = {"User-Agent": f"hackerspace-control-panel/{__version__}"}
 
 
@@ -90,17 +92,52 @@ def is_newer(release: Release, current: str = __version__) -> bool:
     return current_version is not None and release.version > current_version
 
 
-def install(release: Release, exe: Path) -> None:
-    """Download the release and put it in place of exe, which may be running."""
+_held_exe = None  # see protect()
+
+
+def protect(exe: Path) -> None:
+    """Keep our own exe open while we run, so another window can't swap it out from under us.
+
+    PyInstaller reads modules from the exe, by path, the first time they're used, so a
+    copy whose exe was replaced would read garbage. Windows won't rename a file that's
+    open the way Python opens files, so another window's update fails cleanly instead.
+    """
+    global _held_exe
+    try:
+        _held_exe = exe.open("rb")
+    except OSError:
+        _held_exe = None  # not worth stopping for
+
+
+def _unprotect() -> None:
+    global _held_exe
+    if _held_exe is not None:
+        _held_exe.close()
+        _held_exe = None
+
+
+def install(release: Release, exe: Path) -> Path:
+    """Download the release and put it in place of exe, which may be running.
+
+    Returns where the old exe was moved to, so roll_back() can put it back.
+    """
     new = exe.with_name(f"{exe.name}.new")
     try:
         _download(release, new)
         shutil.copymode(exe, new)  # e.g. keep it executable on Linux/macOS
-        old = _move_aside(exe)
+        _unprotect()  # our own hold on the exe would stop us moving it too
+        try:
+            old = _move_aside(exe)
+        except OSError as e:
+            protect(exe)
+            if getattr(e, "winerror", None) == ERROR_SHARING_VIOLATION:
+                raise UpdateError("control-panel is open in another window. Close the other "
+                                  "window, then try again.") from e
+            raise
         try:
             os.replace(new, exe)
         except OSError:
-            os.replace(old, exe)  # put the old one back
+            roll_back(exe, old)
             raise
     except OSError as e:
         raise UpdateError(
@@ -108,6 +145,13 @@ def install(release: Release, exe: Path) -> None:
         ) from e
     finally:
         _remove(new)  # only still there if something went wrong
+    return old
+
+
+def roll_back(exe: Path, old: Path) -> None:
+    """Put the old exe back where it was, e.g. because the new one won't start."""
+    os.replace(old, exe)
+    protect(exe)
 
 
 def run_new_version(exe: Path, args: list[str]) -> int:
@@ -119,11 +163,12 @@ def run_new_version(exe: Path, args: list[str]) -> int:
     # Otherwise PyInstaller treats the new process as part of this one.
     env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
     process = subprocess.Popen([str(exe), *args], env=env)
-    while True:
-        try:
-            return process.wait()
-        except KeyboardInterrupt:  # Ctrl+C reaches both copies; the new one deals with it
-            continue
+    # Ctrl+C reaches both copies; it's the new one's to deal with.
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        return process.wait()
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def remove_leftovers(exe: Path) -> None:

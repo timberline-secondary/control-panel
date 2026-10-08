@@ -1,6 +1,7 @@
 import hashlib
 import http.server
 import json
+import signal
 import sys
 import threading
 
@@ -10,6 +11,12 @@ from control_panel import app, updater
 
 NEW_EXE = b"MZ new version " * 1000
 OLD_EXE = b"MZ old version"
+
+
+@pytest.fixture(autouse=True)
+def let_go_of_the_exe():
+    yield
+    updater._unprotect()  # or Windows can't delete the test's temporary folder
 
 
 @pytest.fixture
@@ -160,21 +167,55 @@ def test_run_new_version_as_a_fresh_copy_and_wait(monkeypatch, exe):
     started = {}
 
     class Process:
-        waits = 0
-
         def __init__(self, args, env):
             started.update(args=args, env=env)
 
         def wait(self):
-            Process.waits += 1
-            if Process.waits == 1:
-                raise KeyboardInterrupt  # Ctrl+C is for the new version, so keep waiting
+            started["ctrl_c_while_waiting"] = signal.getsignal(signal.SIGINT)
             return 7
 
     monkeypatch.setattr(updater.subprocess, "Popen", Process)
+    before = signal.getsignal(signal.SIGINT)
     assert updater.run_new_version(exe, ["--config", "lab.toml"]) == 7
     assert started["args"] == [str(exe), "--config", "lab.toml"]
     assert started["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert started["ctrl_c_while_waiting"] is signal.SIG_IGN  # it's the new version's Ctrl+C
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_install_returns_the_old_exe_for_roll_back(github, exe):
+    github.release()
+    old = updater.install(updater.latest_release(), exe)
+    assert old.read_bytes() == OLD_EXE
+    updater.roll_back(exe, old)
+    assert exe.read_bytes() == OLD_EXE and not old.exists()
+
+
+def test_protect_holds_the_exe_until_install_moves_it(github, exe, monkeypatch):
+    held_during_move = []
+    move_aside = updater._move_aside
+    monkeypatch.setattr(updater, "_move_aside",
+                        lambda path: held_during_move.append(updater._held_exe) or move_aside(path))
+    updater.protect(exe)
+    assert updater._held_exe is not None and not updater._held_exe.closed
+    github.release()
+    updater.install(updater.latest_release(), exe)
+    assert held_during_move == [None]  # let go of it first, or Windows won't move it
+
+
+def test_install_when_another_window_has_the_exe_open(github, exe, monkeypatch):
+    def replace(source, destination):
+        error = PermissionError(13, "The process cannot access the file")
+        error.winerror = updater.ERROR_SHARING_VIOLATION
+        raise error
+
+    monkeypatch.setattr(updater.os, "replace", replace)
+    github.release()
+    with pytest.raises(updater.UpdateError, match="open in another window"):
+        updater.install(updater.latest_release(), exe)
+    assert exe.read_bytes() == OLD_EXE
+    assert sorted(p.name for p in exe.parent.iterdir()) == ["control-panel.exe"]
+    assert updater._held_exe is not None  # holding it again
 
 
 def test_running_exe(monkeypatch, tmp_path):
@@ -194,12 +235,14 @@ def test_running_exe(monkeypatch, tmp_path):
 def frozen_app(monkeypatch, exe):
     """The app as control-panel.exe, with prompts answered from `answers`."""
     monkeypatch.setattr(updater, "running_exe", lambda: exe)
-    record = {"confirm": True, "ran": None, "messages": []}
+    record = {"confirm": True, "ran": None, "messages": [], "paused": 0}
     monkeypatch.setattr(app.ui, "confirm", lambda prompt, **k: record["confirm"])
     for kind in ["info", "success", "error"]:
         monkeypatch.setattr(app.ui, kind, record["messages"].append)
     monkeypatch.setattr(updater, "run_new_version",
                         lambda exe, args: record.update(ran=exe) or 5)
+    monkeypatch.setattr(app.ui, "pause",
+                        lambda *a: record.update(paused=record["paused"] + 1))
     return record
 
 
@@ -249,3 +292,34 @@ def test_install_keeps_the_exe_runnable(github, exe):
     github.release()
     updater.install(updater.latest_release(), exe)
     assert exe.stat().st_mode & 0o111 or sys.platform == "win32"
+
+
+def test_failed_update_waits_so_the_message_can_be_read(github, exe, frozen_app):
+    github.release(digest="wrong")
+    assert app._offer_update() is None
+    assert "didn't match" in frozen_app["messages"][-1]
+    assert frozen_app["paused"] == 1
+    assert exe.read_bytes() == OLD_EXE
+
+
+def test_new_version_that_wont_start_is_rolled_back(github, exe, frozen_app, monkeypatch):
+    def blocked(exe, args):
+        raise OSError(225, "Operation did not complete because the file contains a virus")
+
+    monkeypatch.setattr(updater, "run_new_version", blocked)
+    github.release()
+    assert app._offer_update() is None  # carries on with this version
+    assert exe.read_bytes() == OLD_EXE
+    assert sorted(p.name for p in exe.parent.iterdir()) == ["control-panel.exe"]
+    assert "wouldn't start the new version" in frozen_app["messages"][-1]
+    assert frozen_app["paused"] == 1
+
+
+def test_new_version_wont_start_and_old_cant_be_put_back(github, exe, frozen_app, monkeypatch):
+    monkeypatch.setattr(updater, "run_new_version",
+                        lambda exe, args: (_ for _ in ()).throw(OSError("blocked")))
+    monkeypatch.setattr(updater, "roll_back",
+                        lambda exe, old: (_ for _ in ()).throw(OSError("in use")))
+    github.release()
+    assert app._offer_update() == 1  # stop, rather than run from a replaced exe
+    assert "download it again" in frozen_app["messages"][-1]

@@ -2,6 +2,8 @@
 
 Serves a pretend release from this computer, runs `control-panel.exe --update`
 against it, and checks the running exe really was swapped for the download.
+When CI is building a tag, also checks the tag matches the exe's version, or
+everyone would be offered that release again on every start.
 
     python packaging/check_update.py dist/control-panel.exe
 """
@@ -19,6 +21,7 @@ from pathlib import Path
 
 
 def main(built_exe: Path) -> None:
+    check_tag_matches_version(built_exe)
     served = built_exe.read_bytes()
     routes = {}
 
@@ -69,6 +72,14 @@ def main(built_exe: Path) -> None:
         check(sorted(p.name for p in exe.parent.iterdir()) == [exe.name], "no files left over")
 
         release("v99.0.0", good)
+        if sys.platform == "win32":
+            with exe.open("rb"):  # like another control-panel window would
+                result = run_update(exe)
+            check(result.returncode == 1 and "open in another window" in result.stdout,
+                  "won't swap the exe while another window is using it")
+            check(exe.stat().st_ino == original, "another window: exe left alone")
+            check(sorted(p.name for p in exe.parent.iterdir()) == [exe.name],
+                  "another window: no files left over")
         result = run_update(exe)
         check(result.returncode == 0 and "Updated to v99.0.0" in result.stdout, "updated")
         old = exe.with_name(f"{exe.name}.old")
@@ -79,6 +90,15 @@ def main(built_exe: Path) -> None:
 
     server.shutdown()
     print("All update checks passed.")
+
+
+def check_tag_matches_version(exe: Path) -> None:
+    if os.environ.get("GITHUB_REF_TYPE") != "tag":
+        return
+    tag = os.environ["GITHUB_REF_NAME"]
+    version = subprocess.run([str(exe), "--version"], capture_output=True, text=True)
+    check(version.stdout.strip() == f"control-panel {tag.removeprefix('v')}",
+          f"tag {tag} matches the exe ({version.stdout.strip()}); if not, bump __version__")
 
 
 def check(ok: bool, what: str) -> None:

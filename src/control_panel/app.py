@@ -57,19 +57,35 @@ def _offer_update() -> int | None:
     exe = updater.running_exe()
     if exe is None:
         return None
+    updater.protect(exe)
     updater.remove_leftovers(exe)
     release = updater.latest_release()
     if release is None or not updater.is_newer(release):
         return None
     if not ui.confirm(f"Version {release.tag} is out (you have v{__version__}). Update now?"):
         return None
-    if not _install(release, exe):
+    old = _install(release, exe)
+    if old is None:
+        ui.pause("Press Enter to carry on with this version.")  # before the menu clears it
         return None
     try:
         return updater.run_new_version(exe, sys.argv[1:])
+    except OSError as e:
+        return _new_version_wont_start(exe, old, e)
+
+
+def _new_version_wont_start(exe: Path, old: Path, error: OSError) -> int | None:
+    # Put the old exe back: this copy still reads its code from that path.
+    try:
+        updater.roll_back(exe, old)
     except OSError:
-        ui.info("Close this window and open control-panel again to use it.")
-        return None
+        ui.error(f"The new version won't start ({error}), and the old one couldn't be put "
+                 f"back. Please download it again from {updater.RELEASES_PAGE}")
+        return _pause_if_double_clicked(1)
+    ui.error(f"Windows wouldn't start the new version ({error}). "
+             f"Carrying on with v{__version__}.")
+    ui.pause()
+    return None
 
 
 def _update_now() -> int:
@@ -78,6 +94,7 @@ def _update_now() -> int:
     if exe is None:
         ui.error("Only control-panel.exe can update itself. (From source, use git pull.)")
         return 1
+    updater.protect(exe)
     updater.remove_leftovers(exe)
     release = updater.latest_release(timeout=15)
     if release is None:
@@ -89,15 +106,16 @@ def _update_now() -> int:
     return 0 if _install(release, exe) else 1
 
 
-def _install(release: updater.Release, exe: Path) -> bool:
+def _install(release: updater.Release, exe: Path) -> Path | None:
+    """Returns where the old exe went, or None if it didn't work (and says why)."""
     ui.info(f"Downloading {release.tag} ({release.size / 1_000_000:.1f} MB)...")
     try:
-        updater.install(release, exe)
+        old = updater.install(release, exe)
     except updater.UpdateError as e:
         ui.error(str(e))
-        return False
+        return None
     ui.success(f"Updated to {release.tag}.")
-    return True
+    return old
 
 
 def _main_menu(settings: config.Config) -> None:
