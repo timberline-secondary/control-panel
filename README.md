@@ -148,8 +148,11 @@ free of prompts (like `ThemesPi` in `themes.py`) so they're easy to test.
 
 **Releasing:** CI builds `control-panel.exe` on every push; download it from the run's
 artifacts on the Actions tab to try it. To publish a release, bump `__version__` in
-`src/control_panel/__init__.py`, then push a matching tag (e.g. `v0.3.0`). CI attaches the
-exe to a new GitHub release, and everyone's app offers it the next time they open it.
+`src/control_panel/__init__.py` in a PR. When it's merged, CI builds the exe, tags the commit
+(e.g. `v0.5.0`) and publishes it as a GitHub release, and everyone's app offers it the next time
+they open it. (It does this whenever the newest commit on `main` has a version higher than any
+released so far, so merges that keep the same version publish nothing.) If that CI run fails,
+re-run it from the Actions tab. Pushing a tag like `v0.5.0` by hand also still works.
 
 ## Legacy control panel
 
