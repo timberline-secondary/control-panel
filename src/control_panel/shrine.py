@@ -292,9 +292,10 @@ def _unzip(path: Path, work_dir: Path, budget: list[int]) -> Path:
             archive.extractall(target)  # Python keeps the files inside target
     except ShrineError:
         raise
-    except RuntimeError as e:  # it has a password
-        raise ShrineError("it has a password. Unzip it yourself, then drag in the folder") from e
-    except (OSError, EOFError, ValueError, NotImplementedError, zipfile.BadZipFile) as e:
+    except Exception as e:  # damaged data raises zlib/lzma errors as well as the usual ones
+        if "password" in str(e):
+            raise ShrineError("it has a password. Unzip it yourself, then drag in the "
+                              "folder") from e
         raise ShrineError(f"couldn't unzip it ({e})") from e
     return target
 
@@ -403,7 +404,7 @@ def prepare_picture(source: Path, slide: Path) -> None:
 def _rgba(image: Image.Image) -> Image.Image:
     """Any picture as RGBA. 16-bit greys are scaled down, not clipped to white."""
     if image.mode in ("I;16", "I;16L", "I;16B", "I;16N", "I"):
-        image = image.point(lambda value: value / 256).convert("L")
+        image = image.convert("I").point(lambda value: value / 256).convert("L")
     elif image.mode == "F":
         low, high = image.getextrema()
         image = image.point(lambda value: (value - low) * 255 / ((high - low) or 1)).convert("L")
@@ -475,8 +476,9 @@ def video_args(source: Path, output: Path, *, input_options: tuple[str, ...] = (
                max_seconds: float | None = None) -> list[str]:
     """ffmpeg arguments to convert a video into one the TVs play: 1920x1080, 25 fps, H.264,
     no sound."""
-    # Square the pixels first: some cameras store wide video in narrow pixels.
-    fit = (f"scale=trunc(iw*sar/2)*2:ih,setsar=1,"
+    # Square the pixels first: some cameras store wide video in narrow pixels. (Only then:
+    # resizing square pixels would blur pixel art.)
+    fit = (f"scale=w='if(eq(sar,1),iw,trunc(iw*sar/2)*2)':h=ih:flags={scale_flags},setsar=1,"
            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:flags={scale_flags}"
            f"{':' + _FROM_RGB if from_rgb else ''},"
            f"pad={WIDTH}:{HEIGHT}:-1:-1:color=black,setsar=1,fps={FPS},format=yuv420p")
@@ -650,7 +652,10 @@ def save(made: list[Path], folder: Path, name: str) -> list[Path]:
     return placed
 
 
-_LEGACY_VIDEO = re.compile(r"[^.]+\.(mp4|mov|avi|webm|mkv|ogv|mpe?g|m4v|wmv|gif)")
+# e.g. "IMG_1234.MOV" or "final.v2.mp4", but never part of another shrine ("smith.z.cat.mov")
+_LEGACY_VIDEO = re.compile(
+    r"(?![az]\.)(?!.*\.[az]\.)[^/]+\.(mp4|mov|avi|webm|mkv|ogv|mpe?g|m4v|wmv|gif|3gp|flv|mts|"
+    r"m2ts|ts)", re.IGNORECASE)
 
 
 def is_part_of(file_name: str, name: str) -> bool:
@@ -664,5 +669,5 @@ def is_part_of(file_name: str, name: str) -> bool:
     if not (file_name.startswith(prefix) and file_name.endswith(".mp4")):
         return False
     video = file_name[len(prefix):-len(".mp4")]
-    # The old control panel kept the original extension: name.z.cat.mov.mp4
+    # The old control panel kept the original name: name.z.IMG_1234.MOV.mp4
     return bool(video) and ("." not in video or bool(_LEGACY_VIDEO.fullmatch(video)))

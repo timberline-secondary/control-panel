@@ -82,10 +82,15 @@ def upload_names(videos: list[Path]) -> dict[Path, str]:
     return names
 
 
+_WINDOWS_DEVICES = re.compile(r"(con|prn|aux|nul|com\d|lpt\d)(\..*)?", re.IGNORECASE)
+
+
 def is_safe_name(file_name: str) -> bool:
-    """Only plain names are copied from a TV: a name with '\\' in it could point outside
-    the folder on Windows."""
-    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", file_name)) and not file_name.startswith(".")
+    """Whether a file from a TV can be saved under its own name on Windows. A name with '\\'
+    in it, for example, could point outside the folder."""
+    return (bool(file_name) and not re.search(r'[\\/:*?"<>|\x00-\x1f]', file_name)
+            and not file_name.startswith(".") and not file_name.endswith((" ", "."))
+            and not _WINDOWS_DEVICES.fullmatch(file_name))
 
 
 def is_student(name: str) -> bool:
@@ -587,25 +592,23 @@ def _push_to(tv: TvPi, uploads: dict[Path, str], name: str | None) -> None:
             return
         replace_all = answer == "replace"
     leaving = [f for f in old if replace_all and f not in new_names]  # replaced, not re-copied
+    overwritten = [f for f in old if f in new_names]
 
     needed = sum(video.stat().st_size for video in uploads)
     free = tv.free_space()
     short = free is not None and free - SPARE_SPACE < needed
-    if short and free - SPARE_SPACE + sum(existing[f] for f in old if f in leaving
-                                          or f in new_names) < needed:
+    if short and free - SPARE_SPACE + sum(existing[f] for f in leaving + overwritten) < needed:
         ui.error(f"{tv.name} doesn't have room: these need {size_text(needed)} and it has "
                  f"{size_text(max(0, free - SPARE_SPACE))} to spare. Delete some old "
                  "videos from it first.")
         return
     changed = False
     try:
-        if short:  # make room, deleting only what's going anyway
-            for file_name in leaving:
+        if short:  # make room first, deleting only what's being replaced anyway
+            for file_name in leaving + overwritten:
                 tv.remove(file_name)
                 changed = True
         for video, file_name in uploads.items():
-            if short and file_name in existing:
-                tv.remove(file_name)  # rather than keeping both while it copies
             changed = True
             with ui.progress(f"{tv.name}: copying {file_name}") as update:
                 tv.upload(video, file_name, update)

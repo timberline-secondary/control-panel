@@ -20,10 +20,10 @@ DF = ("Filesystem     1024-blocks    Used Available Capacity Mounted on\n"
 class FakeTvConnection:
     """Pretends to be a TV Pi. files: {name: contents} in its media folder."""
 
-    def __init__(self, files=(), free_kb=10_000_000, usb="", restart_status=0):
+    def __init__(self, files=(), room=10_000_000_000, usb="", restart_status=0):
         self.host = "pi-tv1.hackerspace.tbl"
         self.files = dict(files)
-        self.free_kb = free_kb
+        self.room = room  # bytes free on its SD card
         self.usb = usb
         self.restart_status = restart_status
         self.commands = []
@@ -34,7 +34,7 @@ class FakeTvConnection:
     def run(self, command, *, sudo=False, timeout=60):
         self.commands.append((command, sudo))
         if command.startswith("df "):
-            return CommandResult(0, DF.format(free=self.free_kb))
+            return CommandResult(0, DF.format(free=self.room // 1024))
         if command.startswith("ls /dev/disk/by-id"):
             return CommandResult(0, self.usb)
         if "restart rs" in command:
@@ -49,7 +49,11 @@ class FakeTvConnection:
 
     def upload(self, fileobj, path, progress=None):
         data = fileobj.read()
-        self.files[posixpath.basename(path)] = data
+        name = posixpath.basename(path)
+        if len(data) > self.room:  # the old one, if any, only goes once the new one's in
+            raise OSError(28, "No space left on device")
+        self.room += len(self.files.get(name, b"")) - len(data)
+        self.files[name] = data
         if progress:
             progress(len(data), len(data))
 
@@ -57,7 +61,7 @@ class FakeTvConnection:
         Path(local).write_bytes(self.files[posixpath.basename(path)])
 
     def remove(self, path):
-        del self.files[posixpath.basename(path)]
+        self.room += len(self.files.pop(posixpath.basename(path)))
 
     def close(self):
         self.closed = True
@@ -134,7 +138,9 @@ def test_upload_names_play_and_dont_clash():
 
 
 @pytest.mark.parametrize("name, safe", [
-    ("ann.lee.a.mp4", True), ("Old-Clip_2.MP4", True),
+    ("ann.lee.a.mp4", True), ("Old-Clip_2.MP4", True), ("Art Show 2024.mp4", True),
+    ("old.z.Bob's_cat_(final).mov.mp4", True), ("zoë.lee.a.mp4", True),
+    ("CON.mp4", False), ("a:b.mp4", False), ("clip.mp4 ", False),
     ("ann.lee.a.mp4   \\..\\..\\ann.lee\\ann.lee.a.mp4", False), (".hidden.mp4", False),
 ])
 def test_is_safe_name(name, safe):
@@ -375,21 +381,51 @@ def test_one_tv_failing_doesnt_stop_the_others(tmp_path, monkeypatch):
     assert set(working.files) == {"ann.lee.a.mp4", "ann.lee.z.cat.mp4"}
 
 
-def test_push_when_theres_no_room(tmp_path, monkeypatch):
+@pytest.fixture
+def no_spare_space(monkeypatch):
+    monkeypatch.setattr(tvs, "SPARE_SPACE", 0)
+
+
+def test_push_when_theres_no_room(tmp_path, monkeypatch, no_spare_space):
     screen = Screen(monkeypatch)
-    tv, connection = make_tv(free_kb=10)
-    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
+    tv, connection = make_tv(room=10 * 1024)
+    folder = big_shrine(tmp_path, {"ann.lee.a.mp4": 5, "ann.lee.z.cat.mp4": 20})
+    tvs._push_to(tv, uploads_for(folder), "ann.lee")
     assert connection.files == {}
     assert "doesn't have room" in screen.shown("error")
 
 
-def test_push_makes_room_by_deleting_the_old_ones_first(tmp_path, monkeypatch):
+def big_shrine(tmp_path, sizes):
+    """A shrine folder whose videos have these sizes in KB."""
+    folder = tmp_path / "ann.lee"
+    folder.mkdir()
+    for name, kb in sizes.items():
+        (folder / name).write_bytes(b"n" * kb * 1024)
+    return folder
+
+
+def test_push_makes_room_by_deleting_the_old_ones_first(tmp_path, monkeypatch, no_spare_space):
     Screen(monkeypatch, chooses=["replace"])
-    tv, connection = make_tv(files={"ann.lee.z.big.mp4": b"x" * 100})
-    # Room for the new videos (14 bytes) only once the old one has gone.
-    monkeypatch.setattr(tv, "free_space", lambda: tvs.SPARE_SPACE + 5)
-    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
-    assert set(connection.files) == {"ann.lee.a.mp4", "ann.lee.z.cat.mp4"}
+    # The new videos fit only once the old ones have gone, including the big one that's
+    # being replaced by a smaller one of the same name, after a new one.
+    tv, connection = make_tv(files={"ann.lee.a.mp4": b"o" * 5 * 1024,
+                                    "ann.lee.z.big.mp4": b"o" * 1200 * 1024,
+                                    "ann.lee.z.gone.mp4": b"o" * 100 * 1024}, room=50 * 1024)
+    folder = big_shrine(tmp_path, {"ann.lee.a.mp4": 5, "ann.lee.z.anim.mp4": 400,
+                                   "ann.lee.z.big.mp4": 700})
+    tvs._push_to(tv, uploads_for(folder), "ann.lee")
+    assert {name: len(data) // 1024 for name, data in connection.files.items()} == {
+        "ann.lee.a.mp4": 5, "ann.lee.z.anim.mp4": 400, "ann.lee.z.big.mp4": 700}
+
+
+def test_short_of_room_never_deletes_what_they_keep(tmp_path, monkeypatch, no_spare_space):
+    screen = Screen(monkeypatch, chooses=["keep"])
+    tv, connection = make_tv(files={"ann.lee.a.mp4": b"o" * 5 * 1024,
+                                    "ann.lee.z.old.mp4": b"o" * 1000 * 1024}, room=50 * 1024)
+    folder = big_shrine(tmp_path, {"ann.lee.a.mp4": 5, "ann.lee.z.anim.mp4": 400})
+    tvs._push_to(tv, uploads_for(folder), "ann.lee")
+    assert "doesn't have room" in screen.shown("error")
+    assert set(connection.files) == {"ann.lee.a.mp4", "ann.lee.z.old.mp4"}
 
 
 def test_push_shrine_picks_tvs_and_keeps_videos_off_the_hallway(tmp_path, monkeypatch):

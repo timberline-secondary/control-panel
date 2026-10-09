@@ -181,11 +181,27 @@ def test_damaged_files_are_skipped_not_crashed_on(tmp_path, ffmpeg_path):
 
 def test_text_files_and_playlists_arent_videos(tmp_path, ffmpeg_path):
     (tmp_path / "statement.txt").write_text(("My artist statement. " * 40 + "\n") * 200)
-    (tmp_path / "secret.mp4").write_bytes(b"")
-    (tmp_path / "clip.m3u8").write_text("#EXTM3U\n#EXTINF:3,\nsecret.mp4\n#EXT-X-ENDLIST\n")
+    # A playlist that ffmpeg would happily follow to another file, if it were allowed to.
+    subprocess.run([str(ffmpeg_path), "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc=size=64x48:rate=10:duration=2", str(tmp_path / "secret.ts")],
+                   check=True)
+    (tmp_path / "clip.m3u8").write_text("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n"
+                                        "secret.ts\n#EXT-X-ENDLIST\n")
     for name in ["statement.txt", "clip.m3u8"]:
         with pytest.raises(ShrineError, match="isn't a picture or video"):
             shrine.classify(ffmpeg_path, tmp_path / name)
+
+
+def test_a_damaged_zip_is_skipped(tmp_path, ffmpeg_path):
+    Image.new("RGB", (300, 300), "red").save(tmp_path / "pic.png")
+    with zipfile.ZipFile(tmp_path / "photos.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.write(tmp_path / "pic.png", "pic.png")
+    data = bytearray((tmp_path / "photos.zip").read_bytes())
+    data[60:100] = b"\xff" * 40  # the compressed picture, not the zip's table of contents
+    (tmp_path / "photos.zip").write_bytes(bytes(data))
+    (tmp_path / "work").mkdir()
+    _, skipped = shrine.gather(ffmpeg_path, tmp_path / "photos.zip", tmp_path / "work")
+    assert "couldn't unzip it" in skipped[0].reason
 
 
 def test_gather_finds_videos(tmp_path, ffmpeg_path):
@@ -233,6 +249,14 @@ def test_prepare_picture_scales_16_bit_greys(tmp_path):
     slide = Image.open(tmp_path / "slide.png")
     levels = [slide.getpixel((x, 540))[0] for x in (330, 960, 1590)]
     assert levels == pytest.approx([0, 128, 255], abs=3)  # not clipped to white
+
+
+@pytest.mark.parametrize("mode", ["I;16", "I;16B"])
+def test_prepare_picture_scales_16_bit_greys_either_way_round(tmp_path, mode):
+    Image.frombytes(mode, (4, 4), (40000).to_bytes(2, "big" if mode == "I;16B" else "little")
+                    * 16).save(tmp_path / "grey.tif")
+    shrine.prepare_picture(tmp_path / "grey.tif", tmp_path / "slide.png")
+    assert Image.open(tmp_path / "slide.png").getpixel((960, 540)) == (156, 156, 156)
 
 
 def test_slideshow_frames(tmp_path):
@@ -288,8 +312,11 @@ def test_is_part_of():
     assert not shrine.is_part_of("jo.a.brown.a.mp4", "jo")
     assert not shrine.is_part_of("jo.z.collection.a.mp4", "jo")
     assert shrine.is_part_of("jo.a.smith.z.dance.mp4", "jo.a.smith")
-    # The old control panel's names kept the original extension.
+    # The old control panel's names kept the original name and extension.
     assert shrine.is_part_of("ann.lee.z.cat.mov.mp4", "ann.lee")
+    assert shrine.is_part_of("ann.lee.z.IMG_1234.MOV.mp4", "ann.lee")
+    assert shrine.is_part_of("ann.lee.z.final.v2.mp4.mp4", "ann.lee")
+    assert not shrine.is_part_of("jo.z.smith.z.clip.mov.mp4", "jo")  # jo.z.smith's
 
 
 def test_save_replaces_the_old_shrine(tmp_path):
@@ -405,6 +432,28 @@ def test_make_a_shrine(tmp_path, ffmpeg_path):
     assert [p.label for p in problems] == ["broken.jpg"]
     assert _duration(ffmpeg_path, made[0]) == pytest.approx(8 * 4 + 1, abs=0.1)  # title + 3
     assert _duration(ffmpeg_path, made[1]) == pytest.approx(5.4, abs=0.1)  # 0.6 s, 9 times
+
+
+@pytest.mark.parametrize("width", [32, 33])
+def test_pixel_art_stays_sharp(tmp_path, ffmpeg_path, width):
+    frames = []
+    for shift in (0, 1):  # a red and blue checkerboard
+        frame = Image.new("RGB", (width, width))
+        frame.putdata([(255, 0, 0) if (x + y + shift) % 2 else (0, 0, 255)
+                       for y in range(width) for x in range(width)])
+        frames.append(frame)
+    frames[0].save(tmp_path / "sprite.gif", save_all=True, append_images=frames[1:],
+                   duration=500)
+    made, _ = shrine.make(ffmpeg_path, "x", None,
+                          [shrine.Media(tmp_path / "sprite.gif", ANIMATION, "sprite.gif")],
+                          tmp_path / "work", no_progress)
+    subprocess.run([str(ffmpeg_path), "-v", "error", "-i", str(made[0]), "-frames:v", "1",
+                    str(tmp_path / "frame.png")], check=True)
+    frame = Image.open(tmp_path / "frame.png").convert("RGB")
+    row = [frame.getpixel((x, 540)) for x in range(1920)]
+    content = [p for p in row if max(p) > 60]
+    assert len(content) == 1080  # square, full height
+    assert not [p for p in content if p[0] > 60 and p[2] > 60]  # no red and blue mixed
 
 
 def test_make_a_title_only_shrine(tmp_path, ffmpeg_path):

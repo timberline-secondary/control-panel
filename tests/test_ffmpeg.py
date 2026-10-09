@@ -41,6 +41,7 @@ def test_the_config_setting_comes_first(tmp_path):
 
 
 def test_an_installed_ffmpeg_needs_h264(no_downloads_yet, monkeypatch):
+    monkeypatch.setattr(ffmpeg.sys, "platform", "linux")  # Windows never looks (test below)
     monkeypatch.setattr(ffmpeg.shutil, "which", lambda name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(ffmpeg, "_makes_h264", lambda path: False)
     assert ffmpeg.find() is None
