@@ -29,12 +29,16 @@ jobs:
           CONTROL_PANEL_TEST_DOWNLOADS: "1"  # download ffmpeg for the shrine tests, as the app does
 
   windows-app:
-    # Builds control-panel.exe (download it from this run's artifacts). Pushing a
-    # tag like v0.2.0 also publishes it as a GitHub release.
+    # Builds control-panel.exe (download it from this run's artifacts). When main gets a
+    # version that hasn't been released yet, it's published as a GitHub release, so
+    # releasing is just bumping __version__. (Pushing a tag like v0.2.0 still works too.)
     needs: test
     runs-on: windows-latest
     permissions:
       contents: write
+    concurrency:  # one at a time, so two quick merges can't both release the same version
+      group: windows-app-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -59,5 +63,41 @@ jobs:
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          files: dist/control-panel.exe
+          generate_release_notes: true
+      - name: Is this a version that hasn't been released yet?
+        id: version
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # "control-panel 0.4.0", with a Windows line ending (\r\n)
+          version=$(./dist/control-panel.exe --version | tr -d '\r' | awk '{print $2}')
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Couldn't read the version from the exe (got '$version')."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          tagged=$(git ls-remote --tags origin "refs/tags/v$version" | cut -f1)
+          if [[ -z "$tagged" ]]; then
+            echo "v$version is new: publishing it."
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$tagged" == "$GITHUB_SHA" ]] && ! gh release view "v$version" \
+              --json assets --jq '.assets[].name' 2>/dev/null | grep -qx control-panel.exe; then
+            # Released from this commit, but the exe never got there: e.g. a re-run.
+            echo "v$version is missing its exe: publishing it again."
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version is already released, so there's nothing to publish."
+          fi
+      - name: Publish it as a release
+        # This also creates the v<version> tag, on this commit. (Tags made this way don't
+        # start another CI run, so it isn't built twice.)
+        if: steps.version.outputs.new == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: dist/control-panel.exe
           generate_release_notes: true
