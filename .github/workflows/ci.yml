@@ -36,8 +36,10 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-    concurrency:  # one at a time, so two quick merges can't both release the same version
-      group: windows-app-${{ github.ref }}
+    concurrency:  # releases one at a time (main and hand-pushed tags), so they can't race
+      group: >-
+        ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        && 'windows-app-release' || format('windows-app-{0}', github.ref) }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -79,21 +81,39 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          tagged=$(git ls-remote --tags origin "refs/tags/v$version" | cut -f1)
-          if [[ -z "$tagged" ]]; then
-            echo "v$version is new: publishing it."
-            echo "new=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$tagged" == "$GITHUB_SHA" ]] && ! gh release view "v$version" \
-              --json assets --jq '.assets[].name' 2>/dev/null | grep -qx control-panel.exe; then
-            # Released from this commit, but the exe never got there: e.g. a re-run.
-            echo "v$version is missing its exe: publishing it again."
-            echo "new=true" >> "$GITHUB_OUTPUT"
-          else
+          # Ask GitHub first, outside any 'if', so the step fails if it can't be reached.
+          released=$(git ls-remote --tags origin "refs/tags/v$version" | cut -f1)
+          newest=$(git ls-remote origin refs/heads/main | cut -f1)
+          tags=$(git ls-remote --tags --refs origin 'refs/tags/v*' | sed 's#.*refs/tags/v##')
+          if [[ -n "$released" ]]; then
             echo "v$version is already released, so there's nothing to publish."
+            exit 0
           fi
+          # Only the newest commit releases. An older run (e.g. re-run later) would otherwise
+          # make an older version the "latest" release, hiding the newer one from the app.
+          if [[ "$newest" != "$GITHUB_SHA" ]]; then
+            echo "::notice::main has moved on, so the run for its newest commit releases instead."
+            exit 0
+          fi
+          highest=$(printf '%s\n' "$tags" | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+            | sort -V | tail -n 1)
+          if [[ -n "$highest" && "$(printf '%s\n' "$highest" "$version" | sort -V | tail -n 1)" != "$version" ]]; then
+            echo "::warning::v$version is older than v$highest, so it isn't released. Bump __version__ past $highest."
+            exit 0
+          fi
+          # A draft left by a run that failed part way would otherwise be reused, tag and all.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+              --jq ".[] | select(.draft and .tag_name == \"v$version\") | .id" |
+            while read -r id; do
+              echo "Deleting a draft of v$version left by an earlier run."
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+            done
+          echo "v$version is new: publishing it."
+          echo "new=true" >> "$GITHUB_OUTPUT"
       - name: Publish it as a release
-        # This also creates the v<version> tag, on this commit. (Tags made this way don't
-        # start another CI run, so it isn't built twice.)
+        # This also creates the v<version> tag, on this commit, once the exe is uploaded.
+        # (Tags made this way don't start another CI run, so it isn't built twice.) If it
+        # fails, re-run the job: there's no tag yet, so it tries again.
         if: steps.version.outputs.new == 'true'
         uses: softprops/action-gh-release@v2
         with:
