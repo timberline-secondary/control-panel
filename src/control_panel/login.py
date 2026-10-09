@@ -21,6 +21,7 @@ from control_panel.ssh import (
 
 KEYRING_SERVICE = "hackerspace-control-panel"
 MAX_TYPED_TRIES = 3
+SHARED_HOST = "any-hackerspace-pi"  # keychain entry for a password shared by the Pis
 
 _remembered_this_run: dict[str, str] = {}
 _rejected_this_run: set[tuple[str, str]] = set()  # (account, password) the Pi said no to
@@ -29,10 +30,18 @@ _rejected_this_run: set[tuple[str, str]] = set()  # (account, password) the Pi s
 def connect(settings: PiSettings) -> PiConnection | None:
     """Open a connection, asking for the password if needed. None if they cancel."""
     account = f"{settings.username}@{settings.host}"
+    # The lab's Pis share a login, so a password that works on one is worth trying on the
+    # others before asking. Only one: the latest that worked this run, or else the saved one.
+    # (A Pi this computer hasn't seen before gets nothing the person wouldn't type anyway.)
+    shared_account = f"{settings.username}@{SHARED_HOST}"
+    other_pis = [pw for acct, pw in _remembered_this_run.items()
+                 if acct.startswith(f"{settings.username}@") and acct != account]
+    guess = other_pis[-1] if other_pis else _load(shared_account)
     saved = [
         (settings.password, "config"),
         (_remembered_this_run.get(account), "memory"),
         (_load(account), "keychain"),
+        (guess, "another Pi"),
     ]
     typed_tries = 0
 
@@ -54,6 +63,8 @@ def connect(settings: PiSettings) -> PiConnection | None:
             connection = _open(settings, password)
         except AuthenticationFailed as e:
             _rejected_this_run.add((account, password))
+            if source == "another Pi":
+                continue  # only a guess, so no need to mention it
             ui.error(f"{e} (It's the one in the config file.)" if source == "config" else str(e))
             if source == "keychain":
                 _forget(account)
@@ -67,6 +78,7 @@ def connect(settings: PiSettings) -> PiConnection | None:
             default=False,
         ):
             _save(account, password)
+            _save(shared_account, password)  # for the other Pis, which usually share it
         return connection
 
 

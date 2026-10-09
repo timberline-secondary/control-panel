@@ -46,8 +46,26 @@ class ThemesSettings(PiSettings):
 
 
 @dataclass(frozen=True)
+class TvsSettings:
+    """The TV Pis. They share a login; TV n is at host_pattern with {n} filled in."""
+
+    host_pattern: str = "pi-tv{n}.hackerspace.tbl"
+    port: int = 22
+    username: str = "pi"
+    password: str | None = None
+    media_dir: str = "/home/pi/rs_media"  # the folder Raspberry Slideshow plays
+    shrines_dir: str = ""  # where shrines are saved; empty means Documents/Hackerspace shrines
+    ffmpeg: str = ""  # ffmpeg program to use; empty means download it when it's first needed
+
+    def pi(self, number: int) -> PiSettings:
+        return PiSettings(host=self.host_pattern.format(n=number), port=self.port,
+                          username=self.username, password=self.password)
+
+
+@dataclass(frozen=True)
 class Config:
     themes: ThemesSettings = field(default_factory=ThemesSettings)
+    tvs: TvsSettings = field(default_factory=TvsSettings)
 
 
 def default_path() -> Path:
@@ -87,7 +105,10 @@ def load(config_path: Path | None = None) -> Config:
     unknown = set(data) - {f.name for f in fields(Config)}
     if unknown:
         raise ConfigError(f"Unknown section(s) in {config_path}: {', '.join(sorted(unknown))}")
-    return Config(themes=_section(ThemesSettings, data.get("themes", {}), "themes", config_path))
+    return Config(
+        themes=_section(ThemesSettings, data.get("themes", {}), "themes", config_path),
+        tvs=_section(TvsSettings, data.get("tvs", {}), "tvs", config_path),
+    )
 
 
 def _section(cls, values, name: str, config_path: Path):

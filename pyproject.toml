@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 dependencies = [
     "keyring>=25",
     "paramiko>=3.4",
+    "pillow>=11",
     "questionary>=2.0",
 ]
 
@@ -43,7 +44,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src"]
-extend-exclude = ["panels", "main.py"]  # legacy app, see README
+extend-exclude = ["./panels", "./main.py"]  # the legacy app, see README
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

@@ -8,16 +8,17 @@ import traceback
 from pathlib import Path
 
 from control_panel import __version__, config, ui, updater
-from control_panel.panels import themes
+from control_panel.panels import grade9, themes, tvs
 
-PANELS = [themes]
-NOT_PORTED_YET = ["TVs"]  # from the legacy control panel (panels/TVs), not moved over yet
+PANELS = [themes, tvs, grade9]
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.update:
         return _update_now()
+    if args.self_test:
+        return _self_test()
     try:
         if (new_version_exit_code := _offer_update()) is not None:
             return new_version_exit_code
@@ -46,7 +47,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--update", action="store_true",
                         help="update control-panel.exe to the latest version, then exit")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
+
+
+def _self_test() -> int:
+    """For CI: check the exe has everything it needs to make a title card."""
+    from control_panel import shrine
+
+    card = shrine.title_card(shrine.Title("Self Test", "Digital Art", "2027"))
+    if card.getbbox() is None:
+        ui.error("The title card came out blank.")
+        return 1
+    ui.success("Self test passed.")
+    return 0
 
 
 def _offer_update() -> int | None:
@@ -123,7 +137,6 @@ def _main_menu(settings: config.Config) -> None:
         ui.clear()
         ui.heading(f"Hackerspace Control Panel v{__version__}")
         choices = [ui.choice(panel.TITLE, panel) for panel in PANELS]
-        choices += [ui.choice(name, disabled="coming soon") for name in NOT_PORTED_YET]
         choices.append(ui.choice("Quit", ui.BACK))
         panel = ui.choose("Choose a panel", choices)
         if panel is None:

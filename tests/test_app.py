@@ -15,3 +15,8 @@ def test_bad_config_file_is_reported(tmp_path, capsys):
     path.write_text("[themes]\nnope = 1\n")
     assert app.main(["--config", str(path)]) == 1
     assert "nope" in capsys.readouterr().out
+
+
+def test_self_test(capsys):
+    assert app.main(["--self-test"]) == 0
+    assert "passed" in capsys.readouterr().out
