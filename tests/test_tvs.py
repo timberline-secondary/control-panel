@@ -119,9 +119,26 @@ def test_parse_free_space():
     assert tvs.parse_free_space("df: /nope: No such file or directory") is None
 
 
-def test_shrine_names():
-    assert tvs.shrine_names(["ann.lee.a.mp4", "ann.lee.z.cat.mp4", "skills-2026.a.mp4",
-                             "intro.mp4"]) == {"ann.lee", "skills-2026"}
+def test_shrine_name():
+    assert tvs.shrine_name("ann.lee", ["ann.lee.a.mp4", "ann.lee.z.cat.mp4"]) == "ann.lee"
+    assert tvs.shrine_name("jo.a.smith", ["jo.a.smith.a.mp4"]) == "jo.a.smith"
+    assert tvs.shrine_name("Downloads", ["jo.a.smith.a.mp4", "jo.a.smith.z.x.mp4"]) == \
+        "jo.a.smith"  # from its slideshow
+    assert tvs.shrine_name("Showcase", ["robot_demo.mp4", "intro.mp4"]) is None
+
+
+def test_upload_names_play_and_dont_clash():
+    videos = [Path(n) for n in ["My Video.MP4", "my_video.mp4", "работа.mp4", "作品.mp4"]]
+    assert list(tvs.upload_names(videos).values()) == [
+        "my_video.mp4", "my_video-2.mp4", "video.mp4", "video-2.mp4"]
+
+
+@pytest.mark.parametrize("name, safe", [
+    ("ann.lee.a.mp4", True), ("Old-Clip_2.MP4", True),
+    ("ann.lee.a.mp4   \\..\\..\\ann.lee\\ann.lee.a.mp4", False), (".hidden.mp4", False),
+])
+def test_is_safe_name(name, safe):
+    assert tvs.is_safe_name(name) is safe
 
 
 @pytest.mark.parametrize("name, expected", [
@@ -240,7 +257,8 @@ def test_cancelling_the_password_closes_the_others(monkeypatch):
     first = FakeTvConnection()
     answers = iter([first, None])
     monkeypatch.setattr(tvs.login, "connect", lambda pi: next(answers))
-    assert tvs.connect(TvsSettings(), [1, 2]) == {}
+    with pytest.raises(KeyboardInterrupt):  # so nothing carries on as if it had worked
+        tvs.connect(TvsSettings(), [1, 2])
     assert first.closed
 
 
@@ -285,7 +303,7 @@ def uploads_for(folder):
 def test_push_to_an_empty_tv(tmp_path, monkeypatch):
     screen = Screen(monkeypatch)
     tv, connection = make_tv()
-    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), {"ann.lee"})
+    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
     assert connection.files == {"ann.lee.a.mp4": b"new a", "ann.lee.z.cat.mp4": b"new z.cat"}
     assert ("systemctl restart rs", True) in connection.commands
     screen.finished()
@@ -296,22 +314,71 @@ def test_push_to_an_empty_tv(tmp_path, monkeypatch):
                  "bob.ng.a.mp4": b"bob"}),
     ("keep", {"ann.lee.a.mp4": b"new a", "ann.lee.z.cat.mp4": b"new z.cat",
               "ann.lee.z.old.mp4": b"old z", "bob.ng.a.mp4": b"bob"}),
-    (None, {"ann.lee.a.mp4": b"old a", "ann.lee.z.old.mp4": b"old z", "bob.ng.a.mp4": b"bob"}),
+    ("skip", {"ann.lee.a.mp4": b"old a", "ann.lee.z.old.mp4": b"old z", "bob.ng.a.mp4": b"bob"}),
 ])
 def test_push_when_the_tv_already_has_some(tmp_path, monkeypatch, answer, expected):
     screen = Screen(monkeypatch, chooses=[answer])
     tv, connection = make_tv(files={"ann.lee.a.mp4": b"old a", "ann.lee.z.old.mp4": b"old z",
                                     "bob.ng.a.mp4": b"bob"})
-    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), {"ann.lee"})
+    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
     assert connection.files == expected
     assert "ann.lee.z.old.mp4" in screen.shown("info")  # it showed what was there
     screen.finished()
 
 
+def test_ctrl_c_stops_the_whole_push(tmp_path, monkeypatch):
+    Screen(monkeypatch, chooses=[None])
+    tv, connection = make_tv(files={"ann.lee.a.mp4": b"old a"})
+    with pytest.raises(KeyboardInterrupt):
+        tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
+    assert connection.files == {"ann.lee.a.mp4": b"old a"}
+
+
+def test_push_leaves_other_students_alone(tmp_path, monkeypatch):
+    Screen(monkeypatch, chooses=["replace"])
+    others = {"jo.a.brown.a.mp4": b"brown", "jo.a.brown.z.dance.mp4": b"dance",
+              "jo.z.collection.a.mp4": b"collection"}
+    tv, connection = make_tv(files={**others, "jo.a.smith.z.old.mp4": b"old"})
+    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path, "jo.a.smith", ["a"])), "jo.a.smith")
+    assert connection.files == {**others, "jo.a.smith.a.mp4": b"new a"}
+
+
+def test_a_push_that_fails_part_way(tmp_path, monkeypatch):
+    """Nothing it didn't need to delete is gone, and the slideshow plays what's there now."""
+    screen = Screen(monkeypatch, chooses=["replace"])
+    tv, connection = make_tv(files={"ann.lee.a.mp4": b"old a", "ann.lee.z.cat.mp4": b"old c",
+                                    "ann.lee.z.old.mp4": b"old z"})
+    real_upload = connection.upload
+
+    def drops_out(fileobj, path, progress=None):
+        if path.endswith("z.cat.mp4"):
+            raise OSError("Socket is closed")
+        real_upload(fileobj, path, progress)
+    connection.upload = drops_out
+    with pytest.raises(OSError):
+        tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
+    assert connection.files == {"ann.lee.a.mp4": b"new a", "ann.lee.z.cat.mp4": b"old c",
+                                "ann.lee.z.old.mp4": b"old z"}
+    assert ("systemctl restart rs", True) in connection.commands
+    screen.finished()
+
+
+def test_one_tv_failing_doesnt_stop_the_others(tmp_path, monkeypatch):
+    screen = Screen(monkeypatch, ticks=[[1, 2]])
+    broken, working = FakeTvConnection(), FakeTvConnection()
+    broken.file_sizes = lambda path: (_ for _ in ()).throw(OSError("Socket is closed"))
+    connections = {1: broken, 2: working}
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {
+        n: TvPi(connections[n], n, settings) for n in numbers})
+    tvs.push_shrine(TvsSettings(), shrine_folder(tmp_path))
+    assert "TV 1: that didn't work (Socket is closed)" in screen.shown("error")
+    assert set(working.files) == {"ann.lee.a.mp4", "ann.lee.z.cat.mp4"}
+
+
 def test_push_when_theres_no_room(tmp_path, monkeypatch):
     screen = Screen(monkeypatch)
     tv, connection = make_tv(free_kb=10)
-    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), {"ann.lee"})
+    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
     assert connection.files == {}
     assert "doesn't have room" in screen.shown("error")
 
@@ -321,7 +388,7 @@ def test_push_makes_room_by_deleting_the_old_ones_first(tmp_path, monkeypatch):
     tv, connection = make_tv(files={"ann.lee.z.big.mp4": b"x" * 100})
     # Room for the new videos (14 bytes) only once the old one has gone.
     monkeypatch.setattr(tv, "free_space", lambda: tvs.SPARE_SPACE + 5)
-    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), {"ann.lee"})
+    tvs._push_to(tv, uploads_for(shrine_folder(tmp_path)), "ann.lee")
     assert set(connection.files) == {"ann.lee.a.mp4", "ann.lee.z.cat.mp4"}
 
 
@@ -335,6 +402,20 @@ def test_push_shrine_picks_tvs_and_keeps_videos_off_the_hallway(tmp_path, monkey
     assert screen.ticked_at_first == [[1, 4]]  # A-L, and the hallway
     assert set(connections[1].files) == {"ann.lee.a.mp4", "ann.lee.z.cat.mp4"}
     assert set(connections[4].files) == {"ann.lee.a.mp4"}
+    screen.finished()
+
+
+@pytest.mark.parametrize("answer, expected", [
+    (True, {"ann.lee.a.mp4", "ann.lee.z.cat.mp4"}), (False, {"ann.lee.a.mp4"}), (None, None),
+])
+def test_the_hallway_question_is_asked_even_for_the_hallway_alone(tmp_path, monkeypatch,
+                                                                   answer, expected):
+    screen = Screen(monkeypatch, ticks=[[4]], confirms=[answer])
+    connection = FakeTvConnection()
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {
+        4: TvPi(connection, 4, settings)})
+    tvs.push_shrine(TvsSettings(), shrine_folder(tmp_path))
+    assert (set(connection.files) or None) == expected  # Ctrl+C (None) copies nothing
     screen.finished()
 
 
@@ -372,6 +453,25 @@ def test_copy_videos_from_a_tv(tmp_path, monkeypatch):
     assert (tmp_path / "From TV 1" / "ann.lee.a.mp4").read_bytes() == b"ann"
     assert sorted(p.name for p in (tmp_path / "From TV 1").iterdir()) == ["ann.lee.a.mp4"]
     screen.finished()
+
+
+def test_copying_skips_names_that_arent_safe(tmp_path, monkeypatch):
+    screen = Screen(monkeypatch, confirms=[False])
+    sneaky = "ann.lee.a.mp4   \\..\\..\\ann.lee\\ann.lee.a.mp4"
+    tv, _ = make_tv(files={sneaky: b"x", "bob.ng.a.mp4": b"bob"})
+    tvs._copy_from(tv, [sneaky, "bob.ng.a.mp4"], tmp_path / "From TV 1")
+    assert sorted(p.name for p in (tmp_path / "From TV 1").iterdir()) == ["bob.ng.a.mp4"]
+    assert "Skipping" in screen.shown("warning")
+
+
+def test_reboot_wont_with_a_usb_stick_in(monkeypatch):
+    screen = Screen(monkeypatch, chooses=[2, "reboot"])
+    connection = FakeTvConnection(usb="usb-Kingston_DT-0:0-part1\n")
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {
+        2: TvPi(connection, 2, settings)})
+    tvs.restart(TvsSettings())
+    assert not any("shutdown" in command for command, _ in connection.commands)
+    assert "USB stick" in screen.shown("warning")
 
 
 def test_delete_videos_from_a_tv(monkeypatch):

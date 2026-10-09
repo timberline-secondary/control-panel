@@ -31,16 +31,17 @@ def connect(settings: PiSettings) -> PiConnection | None:
     """Open a connection, asking for the password if needed. None if they cancel."""
     account = f"{settings.username}@{settings.host}"
     # The lab's Pis share a login, so a password that works on one is worth trying on the
-    # others before asking.
+    # others before asking. Only one: the latest that worked this run, or else the saved one.
+    # (A Pi this computer hasn't seen before gets nothing the person wouldn't type anyway.)
     shared_account = f"{settings.username}@{SHARED_HOST}"
     other_pis = [pw for acct, pw in _remembered_this_run.items()
                  if acct.startswith(f"{settings.username}@") and acct != account]
+    guess = other_pis[-1] if other_pis else _load(shared_account)
     saved = [
         (settings.password, "config"),
         (_remembered_this_run.get(account), "memory"),
         (_load(account), "keychain"),
-        *[(pw, "another Pi") for pw in other_pis],
-        (_load(shared_account), "another Pi"),
+        (guess, "another Pi"),
     ]
     typed_tries = 0
 

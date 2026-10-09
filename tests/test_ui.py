@@ -25,7 +25,7 @@ def test_ctrl_d_goes_back_instead_of_crashing(monkeypatch):
         monkeypatch.setattr(ui.questionary, name, lambda *a, **k: Question(raises=EOFError()))
     assert ui.ask("Code") is None
     assert ui.ask_password("Password") is None
-    assert ui.confirm("Sure?") is False
+    assert ui.confirm("Sure?") is None  # which counts as no
     assert ui.choose("Pick", ["a"]) is None
 
 

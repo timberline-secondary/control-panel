@@ -4,6 +4,7 @@ import http.server
 import subprocess
 import threading
 import zipfile
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
@@ -128,6 +129,65 @@ def test_gather_a_zip_file(tmp_path, ffmpeg_path):
     assert [m.label for m in found] == ["art.zip/art/pic 10.jpg", "art.zip/art/sub/pic 1.jpg"]
 
 
+def test_gather_carries_on_past_problems(tmp_path, ffmpeg_path, monkeypatch):
+    make_media(tmp_path / "art")
+    (tmp_path / "art" / "locked").mkdir()
+    with zipfile.ZipFile(tmp_path / "art" / "old.zip", "w") as archive:
+        archive.writestr("a.jpg", b"x")
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self.name == "locked":
+            raise PermissionError(13, "Access is denied")
+        return real_iterdir(self)
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    monkeypatch.setattr(shrine.zipfile.ZipFile, "extractall",
+                        lambda self, target: (_ for _ in ()).throw(RuntimeError("password")))
+    found, skipped = shrine.gather(ffmpeg_path, tmp_path / "art", tmp_path / "work")
+    assert len(found) == 4  # the other pictures are still there
+    reasons = {s.label: s.reason for s in skipped}
+    assert "Access is denied" in reasons["locked"]
+    assert "password" in reasons["old.zip"]
+
+
+def test_zips_have_limits(tmp_path, ffmpeg_path, monkeypatch):
+    def zip_of(path, name, data):
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(name, data)
+    zip_of(tmp_path / "3.zip", "pic.jpg", b"x")
+    zip_of(tmp_path / "2.zip", "3.zip", (tmp_path / "3.zip").read_bytes())
+    zip_of(tmp_path / "1.zip", "2.zip", (tmp_path / "2.zip").read_bytes())
+    (tmp_path / "work").mkdir()
+    _, skipped = shrine.gather(ffmpeg_path, tmp_path / "1.zip", tmp_path / "work")
+    assert skipped == [shrine.Skipped("1.zip/2.zip/3.zip",
+                                      "it's a zip file inside a zip file inside a zip file")]
+    monkeypatch.setattr(shrine, "MAX_UNZIPPED_BYTES", 5)
+    zip_of(tmp_path / "big.zip", "pic.jpg", b"123456")
+    _, skipped = shrine.gather(ffmpeg_path, tmp_path / "big.zip", tmp_path / "work")
+    assert "too big to unzip" in skipped[0].reason
+
+
+def test_damaged_files_are_skipped_not_crashed_on(tmp_path, ffmpeg_path):
+    frames = [Image.new("RGB", (32, 32), c) for c in ("red", "green", "blue", "yellow")]
+    frames[0].save(tmp_path / "full.gif", save_all=True, append_images=frames[1:], duration=100)
+    data = (tmp_path / "full.gif").read_bytes()
+    for cut in range(20, len(data), 5):
+        (tmp_path / "cut.gif").write_bytes(data[:cut])
+        try:
+            shrine.classify(ffmpeg_path, tmp_path / "cut.gif")
+        except shrine.ShrineError:
+            pass  # anything else would stop the app
+
+
+def test_text_files_and_playlists_arent_videos(tmp_path, ffmpeg_path):
+    (tmp_path / "statement.txt").write_text(("My artist statement. " * 40 + "\n") * 200)
+    (tmp_path / "secret.mp4").write_bytes(b"")
+    (tmp_path / "clip.m3u8").write_text("#EXTM3U\n#EXTINF:3,\nsecret.mp4\n#EXT-X-ENDLIST\n")
+    for name in ["statement.txt", "clip.m3u8"]:
+        with pytest.raises(ShrineError, match="isn't a picture or video"):
+            shrine.classify(ffmpeg_path, tmp_path / name)
+
+
 def test_gather_finds_videos(tmp_path, ffmpeg_path):
     video = tmp_path / "clip.webm"
     subprocess.run([str(ffmpeg_path), "-v", "error", "-f", "lavfi", "-i",
@@ -154,13 +214,42 @@ def test_prepare_picture_puts_transparency_on_black(tmp_path):
     assert Image.open(tmp_path / "slide.png").getbbox() is None  # all black
 
 
-def test_slideshow_timeline():
-    args = shrine.slideshow_args(["0.png", "1.png", "2.png"], "out.mp4")
-    graph = args[args.index("-filter_complex") + 1]
-    assert "xfade=transition=fade:duration=1:offset=8[x1]" in graph
-    assert "xfade=transition=fade:duration=1:offset=16[x2]" in graph
-    assert "fade=t=out:st=24:d=1" in graph
-    assert args[args.index("-t", args.index("-map")) + 1] == "25"
+def test_prepare_picture_puts_dark_line_art_on_white(tmp_path):
+    art = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(art).ellipse([10, 10, 90, 90], outline=(0, 0, 0, 255), width=5)
+    art.save(tmp_path / "art.png")
+    shrine.prepare_picture(tmp_path / "art.png", tmp_path / "slide.png")
+    slide = Image.open(tmp_path / "slide.png")
+    assert slide.getpixel((960, 540)) == (255, 255, 255)  # it would vanish on black
+    assert slide.getpixel((100, 540)) == (0, 0, 0)  # the side bars stay black
+
+
+def test_prepare_picture_scales_16_bit_greys(tmp_path):
+    grey = Image.new("I;16", (3, 1))
+    for x, value in enumerate([0, 32768, 65535]):
+        grey.putpixel((x, 0), value)
+    grey.save(tmp_path / "grey.png")
+    shrine.prepare_picture(tmp_path / "grey.png", tmp_path / "slide.png")
+    slide = Image.open(tmp_path / "slide.png")
+    levels = [slide.getpixel((x, 540))[0] for x in (330, 960, 1590)]
+    assert levels == pytest.approx([0, 128, 255], abs=3)  # not clipped to white
+
+
+def test_slideshow_frames(tmp_path):
+    """Each slide comes on at 8k s, crossfading for 1 s; it fades in from and out to black."""
+    slides = []
+    for colour in ["red", "lime", "blue"]:
+        slides.append(tmp_path / f"{colour}.png")
+        Image.new("RGB", (1920, 1080), colour).save(slides[-1], compress_level=1)
+    pixel = [tuple(frame[:3]) for frame in shrine.slideshow_frames(slides)]
+    assert len(pixel) == 25 * shrine.slideshow_seconds(3) == 625
+    assert pixel[0] == (0, 0, 0)  # starts black
+    assert pixel[25] == pixel[199] == (255, 0, 0)  # the first slide, until 8 s
+    red, green, _ = pixel[212]  # half way through fading into the second
+    assert 120 < red < 140 and 115 < green < 135
+    assert pixel[225] == (0, 255, 0)
+    assert pixel[425] == (0, 0, 255)
+    assert pixel[612][2] < 140 and pixel[-1][2] < 20  # fading out to black
     assert shrine.slideshow_seconds(1) == 9  # one slide still ends (the old one never did)
 
 
@@ -171,7 +260,7 @@ def test_animation_frames_and_playlist(tmp_path):
     saved, size = shrine.animation_frames(tmp_path / "a.webp", tmp_path / "frames")
     assert size == (8, 8)
     assert [round(seconds, 3) for _, seconds in saved] == [0.2, 0.1, 0.3]  # 0 ms -> 100 ms
-    assert Image.open(saved[2][0]).getpixel((0, 0)) == (0, 0, 0)  # transparent -> black
+    assert Image.open(saved[2][0]).getpixel((0, 0)) == (0, 0, 0)  # clear -> black
     shrine.write_playlist(saved, 2, tmp_path / "frames.txt")
     lines = (tmp_path / "frames.txt").read_text().splitlines()
     assert lines[0] == "ffconcat version 1.0"
@@ -185,6 +274,8 @@ def test_video_file_names():
         "ann.lee.z.my_film.mp4"
     assert shrine.video_file_name("ann.lee", "my film.mp4", taken) == "ann.lee.z.my_film-2.mp4"
     assert shrine.video_file_name("ann.lee", "???.gif", taken) == "ann.lee.z.video.mp4"
+    assert shrine.video_file_name("ann.lee", "Scene.A.final.mov", taken) == \
+        "ann.lee.z.scene-a-final.mp4"  # no dots, so whose it is stays clear
 
 
 def test_is_part_of():
@@ -193,13 +284,44 @@ def test_is_part_of():
     assert not shrine.is_part_of("ann.leeson.a.mp4", "ann.lee")
     assert not shrine.is_part_of("ann.lee.a.mp4.part", "ann.lee")
     assert not shrine.is_part_of("ann.lee.a.mp4", "ann")
+    # A middle initial of A or Z doesn't confuse it.
+    assert not shrine.is_part_of("jo.a.brown.a.mp4", "jo")
+    assert not shrine.is_part_of("jo.z.collection.a.mp4", "jo")
+    assert shrine.is_part_of("jo.a.smith.z.dance.mp4", "jo.a.smith")
+    # The old control panel's names kept the original extension.
+    assert shrine.is_part_of("ann.lee.z.cat.mov.mp4", "ann.lee")
 
 
-def test_remove_old(tmp_path):
+def test_save_replaces_the_old_shrine(tmp_path):
+    folder = tmp_path / "ann.lee"
+    folder.mkdir()
     for name in ["ann.lee.a.mp4", "ann.lee.z.cat.mp4", "ann.leeson.a.mp4", "notes.txt"]:
-        (tmp_path / name).write_bytes(b"")
-    shrine.remove_old(tmp_path, "ann.lee")
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["ann.leeson.a.mp4", "notes.txt"]
+        (folder / name).write_bytes(b"old")
+    (tmp_path / "ann.lee.a.mp4").write_bytes(b"new")
+    saved = shrine.save([tmp_path / "ann.lee.a.mp4"], folder, "ann.lee")
+    assert saved == [folder / "ann.lee.a.mp4"]
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == {
+        "ann.lee.a.mp4": b"new", "ann.leeson.a.mp4": b"old", "notes.txt": b"old"}
+
+
+def test_save_is_all_or_nothing(tmp_path, monkeypatch):
+    folder = tmp_path / "ann.lee"
+    folder.mkdir()
+    for name in ["ann.lee.a.mp4", "ann.lee.z.cat.mp4"]:
+        (folder / name).write_bytes(b"old")
+    (tmp_path / "ann.lee.a.mp4").write_bytes(b"new")
+    real_replace = shrine.os.replace
+
+    def in_use(source, target):  # as Windows does with a video that's open in a player
+        if Path(source).name == "ann.lee.z.cat.mp4":
+            raise PermissionError(32, "The file is being used by another process")
+        real_replace(source, target)
+    monkeypatch.setattr(shrine.os, "replace", in_use)
+    with pytest.raises(PermissionError):
+        shrine.save([tmp_path / "ann.lee.a.mp4"], folder, "ann.lee")
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == {
+        "ann.lee.a.mp4": b"old", "ann.lee.z.cat.mp4": b"old"}
+    assert (tmp_path / "ann.lee.a.mp4").exists()  # the new one is still there to try again
 
 
 @pytest.mark.parametrize("url, expected", [

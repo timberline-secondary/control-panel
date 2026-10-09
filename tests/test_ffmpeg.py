@@ -116,3 +116,39 @@ def test_run_reports_progress(ffmpeg_path, tmp_path):
 def test_run_raises_ffmpegs_own_message(ffmpeg_path, tmp_path):
     with pytest.raises(FfmpegError, match="No such file|does not exist"):
         ffmpeg.run(ffmpeg_path, ["-i", str(tmp_path / "missing.mov"), str(tmp_path / "x.mp4")])
+
+
+def test_windows_only_uses_the_checked_download(no_downloads_yet, monkeypatch):
+    # Windows would also find an ffmpeg.bat in the current folder (often Downloads).
+    monkeypatch.setattr(ffmpeg.sys, "platform", "win32")
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda name: pytest.fail("looked on PATH"))
+    assert ffmpeg.find() is None
+
+
+def _raw_frames(count):
+    return (bytes([value]) * (64 * 48 * 3) for value in range(count))
+
+
+RAW_64x48 = ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "64x48", "-r", "25", "-i", "pipe:0"]
+
+
+def test_encode_frames(ffmpeg_path, tmp_path):
+    seen = []
+    ffmpeg.encode(ffmpeg_path, _raw_frames(50), 50, [*RAW_64x48, str(tmp_path / "out.mp4")],
+                  progress=seen.append)
+    assert ffmpeg.probe(ffmpeg_path, tmp_path / "out.mp4").duration == pytest.approx(2, abs=0.1)
+    assert seen == [0.5, 1.0, 1.0]
+
+
+def test_encode_stops_ffmpeg_if_a_frame_cant_be_made(ffmpeg_path, tmp_path):
+    def frames():
+        yield from _raw_frames(10)
+        raise ValueError("a damaged slide")
+    with pytest.raises(ValueError):
+        ffmpeg.encode(ffmpeg_path, frames(), 50, [*RAW_64x48, str(tmp_path / "out.mp4")])
+
+
+def test_encode_reports_ffmpegs_error(ffmpeg_path, tmp_path):
+    with pytest.raises(FfmpegError, match="nope|Unknown encoder|not found"):
+        ffmpeg.encode(ffmpeg_path, _raw_frames(500), 500,
+                      [*RAW_64x48, "-c:v", "nope", str(tmp_path / "out.mp4")])

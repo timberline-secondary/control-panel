@@ -27,13 +27,14 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 import zipfile
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat
 
 from control_panel import __version__, ffmpeg
 
@@ -50,9 +51,14 @@ PICTURE = "picture"
 ANIMATION = "animation"  # an animated GIF, PNG or WebP
 VIDEO = "video"
 
-Image.MAX_IMAGE_PIXELS = 250_000_000  # big photos are fine; Pillow's default is cautious
+MAX_PICTURE_PIXELS = 120_000_000  # bigger pictures need gigabytes of memory to prepare
+MAX_UNZIPPED_BYTES = 4_000_000_000  # in all, from the zip files in one folder or link
+MAX_ZIP_DEPTH = 2  # a zip inside a zip is opened, but not a zip inside that
+Image.MAX_IMAGE_PIXELS = MAX_PICTURE_PIXELS  # Pillow refuses twice this; classify() this
+warnings.simplefilter("ignore", Image.DecompressionBombWarning)  # classify() says it nicely
 
 _SKIP = {"thumbs.db", "desktop.ini", ".ds_store"}
+_NOT_PICTURES = {"MPEG"}  # Pillow reads these, but they're videos
 _NOT_MEDIA = {
     ".svg": "drawings (.svg) can't go on the TVs. Export it as a PNG",
     ".pdf": "PDFs can't go on the TVs. Export the pages as pictures",
@@ -189,66 +195,107 @@ def classify(ffmpeg_path: Path, path: Path) -> str:
 
     Raises ShrineError saying why if it's none of those.
     """
+    opened = False
     try:
         with Image.open(path) as image:
-            if getattr(image, "is_animated", False) and image.format in ("GIF", "PNG", "WEBP"):
-                return ANIMATION
-            return PICTURE
+            opened = True
+            if image.format not in _NOT_PICTURES:
+                if image.width * image.height > MAX_PICTURE_PIXELS:
+                    raise ShrineError(f"the picture is too big ({image.width}x{image.height}). "
+                                      "Make it smaller, e.g. 4000 pixels wide, first")
+                if getattr(image, "is_animated", False) and \
+                        image.format in ("GIF", "PNG", "WEBP"):
+                    return ANIMATION
+                return PICTURE
+            opened = False
+    except ShrineError:
+        raise
     except Image.DecompressionBombError as e:
-        raise ShrineError("the picture is too big (over 250 megapixels)") from e
-    except (OSError, ValueError, SyntaxError):
-        pass  # not a picture Pillow knows; maybe a video
+        raise ShrineError("the picture is too big. Make it smaller first") from e
+    except Exception as e:  # Pillow raises all sorts for damaged files
+        if opened:
+            raise ShrineError("it seems to be damaged (maybe it was only partly copied)") from e
     reason = _NOT_MEDIA.get(path.suffix.lower())
     if reason:
         raise ShrineError(reason)
-    probe = ffmpeg.probe(ffmpeg_path, path)
-    if probe.has_video and probe.duration and probe.duration >= 0.5:
-        return VIDEO
     if path.suffix.lower() in (".heic", ".heif"):
         raise ShrineError("iPhone photos (.heic) need converting to JPG first")
+    probe = ffmpeg.probe(ffmpeg_path, path)
+    # Some recordings (e.g. from a web browser) don't say how long they are.
+    if probe.has_video and (probe.duration is None or probe.duration >= 0.5):
+        return VIDEO
     raise ShrineError("it isn't a picture or video")
 
 
-def gather(ffmpeg_path: Path, source: Path, work_dir: Path) -> tuple[list[Media], list[Skipped]]:
-    """Every picture and video in a folder (and its subfolders), a file, or a zip file."""
+def gather(ffmpeg_path: Path, source: Path, work_dir: Path, *, depth: int = 0,
+           budget: list[int] | None = None) -> tuple[list[Media], list[Skipped]]:
+    """Every picture and video in a folder (and its subfolders), a file, or a zip file.
+
+    One file that can't be used (a zip with a password, a folder that can't be opened...)
+    is listed in what's skipped, rather than stopping everything.
+    """
+    budget = [MAX_UNZIPPED_BYTES] if budget is None else budget  # shared by nested calls
     found: list[Media] = []
     skipped: list[Skipped] = []
     if source.is_dir():
-        files = [(path, path.relative_to(source).as_posix()) for path in _walk(source)]
+        problems: list[tuple[Path, str]] = []
+        files = [(path, path.relative_to(source).as_posix()) for path in _walk(source, problems)]
+        skipped += [Skipped(folder.relative_to(source).as_posix() if folder != source
+                            else source.name, reason) for folder, reason in problems]
     else:
         files = [(source, source.name)]
     for path, label in files:
-        if path.suffix.lower() == ".zip" and zipfile.is_zipfile(path):
-            inside, inside_skipped = gather(ffmpeg_path, _unzip(path, work_dir), work_dir)
-            found += [Media(m.path, m.kind, f"{label}/{m.label}") for m in inside]
-            skipped += [Skipped(f"{label}/{s.label}", s.reason) for s in inside_skipped]
-            continue
         try:
-            found.append(Media(path, classify(ffmpeg_path, path), label))
+            if path.suffix.lower() == ".zip" and zipfile.is_zipfile(path):
+                if depth >= MAX_ZIP_DEPTH:
+                    raise ShrineError("it's a zip file inside a zip file inside a zip file")
+                inside, inside_skipped = gather(ffmpeg_path, _unzip(path, work_dir, budget),
+                                                work_dir, depth=depth + 1, budget=budget)
+                found += [Media(m.path, m.kind, f"{label}/{m.label}") for m in inside]
+                skipped += [Skipped(f"{label}/{s.label}", s.reason) for s in inside_skipped]
+            else:
+                found.append(Media(path, classify(ffmpeg_path, path), label))
         except ShrineError as e:
             skipped.append(Skipped(label, str(e)))
+        except OSError as e:
+            skipped.append(Skipped(label, f"couldn't read it ({e.strerror or e})"))
     return found, skipped
 
 
-def _walk(folder: Path) -> Iterator[Path]:
-    """Files in folder and its subfolders, in natural order, leaving out hidden/system files."""
-    entries = sorted(folder.iterdir(), key=lambda p: natural_key(p.name))
+def _walk(folder: Path, problems: list[tuple[Path, str]]) -> Iterator[Path]:
+    """Files in folder and its subfolders, in natural order, leaving out hidden/system files.
+    Folders that can't be opened are added to problems."""
+    try:
+        entries = sorted(folder.iterdir(), key=lambda p: natural_key(p.name))
+    except OSError as e:
+        problems.append((folder, f"couldn't open the folder ({e.strerror or e})"))
+        return
     for entry in entries:
         if entry.name.startswith((".", "~$")) or entry.name.lower() in _SKIP:
             continue
         if entry.is_dir():
-            yield from _walk(entry)
+            if not entry.is_symlink():  # a link back up would go round forever
+                yield from _walk(entry, problems)
         elif entry.is_file():
             yield entry
 
 
-def _unzip(path: Path, work_dir: Path) -> Path:
+def _unzip(path: Path, work_dir: Path, budget: list[int]) -> Path:
     target = work_dir / f"zip-{len(list(work_dir.glob('zip-*')))}"
     try:
         with zipfile.ZipFile(path) as archive:
+            members = archive.infolist()
+            size = sum(member.file_size for member in members)  # Python won't unzip more
+            if size > budget[0] or len(members) > 10_000:
+                raise ShrineError("it's too big to unzip (over 4 GB, or over 10,000 files)")
+            budget[0] -= size
             archive.extractall(target)  # Python keeps the files inside target
-    except (OSError, zipfile.BadZipFile, RuntimeError) as e:  # RuntimeError: has a password
-        raise ShrineError(f"Couldn't open {path.name}: {e}") from e
+    except ShrineError:
+        raise
+    except RuntimeError as e:  # it has a password
+        raise ShrineError("it has a password. Unzip it yourself, then drag in the folder") from e
+    except (OSError, EOFError, ValueError, NotImplementedError, zipfile.BadZipFile) as e:
+        raise ShrineError(f"couldn't unzip it ({e})") from e
     return target
 
 
@@ -342,60 +389,100 @@ def _unused(path: Path) -> Path:
 # --- Making the videos ---------------------------------------------------------------------
 
 def prepare_picture(source: Path, slide: Path) -> None:
-    """Save a picture as a 1920x1080 slide: upright, transparency on black, letterboxed."""
+    """Save a picture as a 1920x1080 slide: upright, letterboxed, transparency filled in."""
     with Image.open(source) as image:
         image.draft("RGB", SIZE)  # big JPEGs load much faster at a smaller size
-        image.seek(0)  # the first frame, if it's animated
-        upright = ImageOps.exif_transpose(image)
-        picture = _on_black(upright)
+        picture = _rgba(ImageOps.exif_transpose(image))
     picture = ImageOps.contain(picture, SIZE, Image.Resampling.LANCZOS)
+    picture = flatten(picture, background_for(picture))
     canvas = Image.new("RGB", SIZE, "black")
     canvas.paste(picture, ((WIDTH - picture.width) // 2, (HEIGHT - picture.height) // 2))
     canvas.save(slide, compress_level=1)
 
 
-def _on_black(image: Image.Image) -> Image.Image:
-    rgba = image.convert("RGBA")
-    background = Image.new("RGBA", rgba.size, "black")
-    return Image.alpha_composite(background, rgba).convert("RGB")
+def _rgba(image: Image.Image) -> Image.Image:
+    """Any picture as RGBA. 16-bit greys are scaled down, not clipped to white."""
+    if image.mode in ("I;16", "I;16L", "I;16B", "I;16N", "I"):
+        image = image.point(lambda value: value / 256).convert("L")
+    elif image.mode == "F":
+        low, high = image.getextrema()
+        image = image.point(lambda value: (value - low) * 255 / ((high - low) or 1)).convert("L")
+    return image.convert("RGBA")
+
+
+def background_for(picture: Image.Image) -> str:
+    """What to show through see-through parts: black, unless what's visible is dark (like
+    black line art on a clear background), which would vanish on black."""
+    alpha = picture.getchannel("A")
+    if alpha.getextrema()[0] == 255:
+        return "black"  # nothing is see-through
+    visible = alpha.point(lambda a: 255 if a >= 128 else 0)
+    brightness = ImageStat.Stat(picture.convert("L"), mask=visible)
+    return "white" if brightness.count[0] and brightness.mean[0] < 60 else "black"
+
+
+def flatten(picture: Image.Image, background: str) -> Image.Image:
+    canvas = Image.new("RGBA", picture.size, background)
+    return Image.alpha_composite(canvas, picture).convert("RGB")
 
 
 def slideshow_seconds(slide_count: int) -> int:
     return SECONDS_PER_PICTURE * slide_count + FADE_SECONDS
 
 
-def slideshow_args(slides: list[Path], output: Path) -> list[str]:
-    """ffmpeg arguments for a slideshow of 1920x1080 slides.
+def slideshow_frames(slides: list[Path]) -> Iterator[bytes]:
+    """Every frame of a slideshow of 1920x1080 slides, as raw RGB.
 
-    Slide k is fully on screen from 8k+1 s to 8k+8 s, crossfading into the next for 1 s.
-    The whole thing fades in from black and out to black, so it's 8n+1 seconds long.
-    Each slide is read as 1 frame a second and repeated (fps) so it's quick to make.
+    Slide k comes on at 8k seconds, fading in over the one before for 1 s. The first fades
+    in from black and the last fades out to black, so it's 8n+1 seconds long. Making the
+    frames here (rather than in one big ffmpeg filter) keeps memory use the same however
+    many slides there are.
     """
-    step, fade = SECONDS_PER_PICTURE, FADE_SECONDS
-    args: list[str] = []
+    fade = FPS * FADE_SECONDS
+    hold = FPS * SECONDS_PER_PICTURE - fade
+    black = Image.new("RGB", SIZE, "black")
+    previous = black
     for slide in slides:
-        args += ["-loop", "1", "-framerate", "1", "-t", str(step + fade), "-i", str(slide)]
-    seconds = slideshow_seconds(len(slides))
-    graph = [f"[{i}:v]fps={FPS},format=yuv420p,setsar=1[s{i}]" for i in range(len(slides))]
-    last = "s0"
-    for i in range(1, len(slides)):
-        graph.append(f"[{last}][s{i}]xfade=transition=fade:duration={fade}:offset={step * i}"
-                     f"[x{i}]")
-        last = f"x{i}"
-    graph.append(f"[{last}]fade=t=in:d={fade},fade=t=out:st={seconds - fade}:d={fade}[v]")
-    return [*args, "-filter_complex", ";".join(graph), "-map", "[v]",
-            "-t", str(seconds), *_h264(), str(output)]
+        with Image.open(slide) as image:
+            current = image.convert("RGB")
+        if current.size != SIZE:
+            current = current.resize(SIZE)
+        for i in range(fade):
+            yield Image.blend(previous, current, i / fade).tobytes()
+        still = current.tobytes()
+        for _ in range(hold):
+            yield still
+        previous = current
+    for i in range(fade):
+        yield Image.blend(previous, black, i / fade).tobytes()
 
 
-def video_args(source: Path, output: Path, *, scale_flags: str = "bicubic",
+# Pictures are RGB; TVs expect HD video's colours (BT.709, TV range), so convert and say so.
+_FROM_RGB = "out_color_matrix=bt709:out_range=tv"
+_BT709 = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+          "-color_range", "tv"]
+
+
+def slideshow_args(output: Path) -> list[str]:
+    """ffmpeg arguments to encode slideshow_frames() (fed to it through stdin)."""
+    return ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS),
+            "-i", "pipe:0", "-vf", f"scale={_FROM_RGB},format=yuv420p", *_BT709, *_h264(),
+            str(output)]
+
+
+def video_args(source: Path, output: Path, *, input_options: tuple[str, ...] = (),
+               scale_flags: str = "bicubic", from_rgb: bool = False,
                max_seconds: float | None = None) -> list[str]:
     """ffmpeg arguments to convert a video into one the TVs play: 1920x1080, 25 fps, H.264,
     no sound."""
-    fit = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:flags={scale_flags},"
+    # Square the pixels first: some cameras store wide video in narrow pixels.
+    fit = (f"scale=trunc(iw*sar/2)*2:ih,setsar=1,"
+           f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:flags={scale_flags}"
+           f"{':' + _FROM_RGB if from_rgb else ''},"
            f"pad={WIDTH}:{HEIGHT}:-1:-1:color=black,setsar=1,fps={FPS},format=yuv420p")
     limit = ["-t", f"{max_seconds:.3f}"] if max_seconds else []
-    return ["-i", str(source), "-map", "0:v:0", "-vf", fit, "-an", "-sn", "-dn",
-            "-map_metadata", "-1", *limit, *_h264(), str(output)]
+    return [*input_options, "-i", str(source), "-map", "0:v:0", "-vf", fit, "-an", "-sn", "-dn",
+            "-map_metadata", "-1", *limit, *(_BT709 if from_rgb else []), *_h264(), str(output)]
 
 
 def _h264() -> list[str]:
@@ -408,19 +495,23 @@ Frames = list[tuple[Path, float]]  # (frame, how many seconds it's shown)
 
 
 def animation_frames(source: Path, folder: Path) -> tuple[Frames, tuple[int, int]]:
-    """Save an animation's frames, on black. Returns ([(frame, seconds)], frame size).
+    """Save an animation's frames, see-through parts filled in. Returns
+    ([(frame, seconds)], frame size).
 
     ffmpeg can't read animated WebP, and gets GIF transparency and timing wrong, so
     Pillow does this part.
     """
     folder.mkdir(parents=True, exist_ok=True)
     frames = []
+    background = None
     with Image.open(source) as image:
         size = image.size
         for index in range(getattr(image, "n_frames", 1)):
             image.seek(index)
+            picture = _rgba(image)
+            background = background or background_for(picture)  # the same for every frame
             frame = folder / f"{index:05d}.png"
-            _on_black(image).save(frame, compress_level=1)
+            flatten(picture, background).save(frame, compress_level=1)
             # Browsers show frames of 10 ms or less for 100 ms; so do we.
             duration = image.info.get("duration") or 0
             frames.append((frame, duration / 1000 if duration > 10 else 0.1))
@@ -438,8 +529,12 @@ def write_playlist(frames: Frames, loops: int, playlist: Path) -> None:
 
 
 def video_file_name(name: str, label: str, taken: set[str]) -> str:
-    """<name>.z.<video's name>.mp4, made unique among taken (which it's added to)."""
-    stem = clean_name(posixpath.splitext(posixpath.basename(label))[0]) or "video"
+    """<name>.z.<video's name>.mp4, made unique among taken (which it's added to).
+
+    The video's part has no dots, so it's always clear whose shrine a file is part of.
+    """
+    stem = clean_name(posixpath.splitext(posixpath.basename(label))[0]).replace(".", "-")
+    stem = stem or "video"
     candidate, n = f"{name}.z.{stem}.mp4", 2
     while candidate in taken:
         candidate, n = f"{name}.z.{stem}-{n}.mp4", n + 1
@@ -455,6 +550,7 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
     """Make the shrine's videos in work_dir. Returns (the videos, what couldn't be used).
 
     progress(label) is a context manager giving a function to report progress (0 to 1).
+    One file that can't be used is reported, rather than stopping the whole shrine.
     """
     made: list[Path] = []
     problems: list[Skipped] = []
@@ -473,16 +569,20 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
                 try:
                     prepare_picture(picture.path, slide)
                     slides.append(slide)
-                except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as e:
+                except Exception as e:  # a damaged or odd file; Pillow raises all sorts
                     problems.append(Skipped(picture.label, f"couldn't read it ({e})"))
                 update(i / len(pictures))
 
     if slides:
         output = work_dir / f"{name}.a.mp4"
-        with progress(f"Making the slideshow ({len(slides)} slides)") as update:
-            ffmpeg.run(ffmpeg_path, slideshow_args(slides, output),
-                       seconds=slideshow_seconds(len(slides)), progress=update)
-        made.append(output)
+        try:
+            with progress(f"Making the slideshow ({len(slides)} slides)") as update:
+                ffmpeg.encode(ffmpeg_path, slideshow_frames(slides),
+                              FPS * slideshow_seconds(len(slides)), slideshow_args(output),
+                              progress=update)
+            made.append(output)
+        except Exception as e:
+            problems.append(Skipped("the slideshow", f"couldn't make it ({e})"))
 
     taken: set[str] = set()
     for item in (m for m in media if m.kind in (VIDEO, ANIMATION)):
@@ -491,7 +591,7 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
             with progress(f"Converting {item.label}") as update:
                 _convert(ffmpeg_path, item, output, work_dir, update)
             made.append(output)
-        except (ffmpeg.FfmpegError, OSError, ValueError, SyntaxError) as e:
+        except Exception as e:
             problems.append(Skipped(item.label, f"couldn't convert it ({e})"))
     return made, problems
 
@@ -500,7 +600,9 @@ def _convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
              update: Callable[[float], None]) -> None:
     if item.kind == VIDEO:
         seconds = ffmpeg.probe(ffmpeg_path, item.path).duration
-        ffmpeg.run(ffmpeg_path, video_args(item.path, output), seconds=seconds, progress=update)
+        args = video_args(item.path, output,
+                          input_options=("-format_whitelist", ffmpeg.VIDEO_FORMATS))
+        ffmpeg.run(ffmpeg_path, args, seconds=seconds, progress=update)
         return
     folder = work_dir / f"frames-{output.stem}"
     frames, (width, height) = animation_frames(item.path, folder)
@@ -510,20 +612,57 @@ def _convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
     write_playlist(frames, loops, playlist)
     # Pixel art stays sharp when it's made much bigger.
     sharp = min(WIDTH / width, HEIGHT / height) >= 2
-    args = video_args(playlist, output, scale_flags="neighbor" if sharp else "lanczos",
-                      max_seconds=once * loops)
-    ffmpeg.run(ffmpeg_path, ["-f", "concat", *args], seconds=once * loops, progress=update)
+    args = video_args(playlist, output, input_options=("-f", "concat"), from_rgb=True,
+                      scale_flags="neighbor" if sharp else "lanczos", max_seconds=once * loops)
+    ffmpeg.run(ffmpeg_path, args, seconds=once * loops, progress=update)
     shutil.rmtree(folder, ignore_errors=True)
 
 
-def remove_old(folder: Path, name: str) -> None:
-    """Delete a shrine's videos from a folder, before saving new ones there."""
-    for path in folder.glob("*.mp4"):
-        if is_part_of(path.name, name):
-            os.remove(path)
+def save(made: list[Path], folder: Path, name: str) -> list[Path]:
+    """Copy newly made videos into folder, in place of the shrine's old ones there.
+
+    All or nothing: if something's in the way (e.g. Windows won't let go of an old video
+    because it's open in a video player), OSError is raised and the folder is as it was.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    old = [path for path in folder.glob("*.mp4") if is_part_of(path.name, name)]
+    aside: list[tuple[Path, Path]] = []
+    placed: list[Path] = []
+    try:
+        for path in old:
+            hidden = path.with_name(f".{path.name}.old")
+            os.replace(path, hidden)
+            aside.append((hidden, path))
+        for video in made:
+            placed.append(folder / video.name)
+            shutil.copyfile(video, placed[-1])
+    except BaseException:
+        for path in placed:
+            path.unlink(missing_ok=True)
+        for hidden, path in aside:
+            os.replace(hidden, path)
+        raise
+    for hidden, _ in aside:
+        try:
+            hidden.unlink()
+        except OSError:
+            pass  # hidden, so it's harmless
+    return placed
+
+
+_LEGACY_VIDEO = re.compile(r"[^.]+\.(mp4|mov|avi|webm|mkv|ogv|mpe?g|m4v|wmv|gif)")
 
 
 def is_part_of(file_name: str, name: str) -> bool:
-    """Whether a file on a TV (or in a folder) belongs to the shrine called name."""
-    return file_name.startswith((f"{name}.a.", f"{name}.z.")) and \
-        file_name.lower().endswith(".mp4")
+    """Whether a file on a TV (or in a folder) belongs to the shrine called name.
+
+    Exact, so 'jo' and 'jo.a.smith' (or 'ann.lee' and 'ann.leeson') are never mixed up.
+    """
+    if file_name == f"{name}.a.mp4":
+        return True
+    prefix = f"{name}.z."
+    if not (file_name.startswith(prefix) and file_name.endswith(".mp4")):
+        return False
+    video = file_name[len(prefix):-len(".mp4")]
+    # The old control panel kept the original extension: name.z.cat.mov.mp4
+    return bool(video) and ("." not in video or bool(_LEGACY_VIDEO.fullmatch(video)))

@@ -9,6 +9,7 @@ its size and checksum are checked before it's used.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import os
@@ -20,7 +21,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,11 @@ from control_panel.config import APP_NAME
 
 _HEADERS = {"User-Agent": f"hackerspace-control-panel/{__version__}"}
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows: no extra console window
+
+# The only kinds of file ffmpeg may open for a student's video. Others can do surprising
+# things: a playlist (.m3u8) can pull in other files on this computer or the network, and a
+# text file opens as a "video" of scrolling text.
+VIDEO_FORMATS = "mov,matroska,avi,flv,mpeg,mpegts,asf,ogg,dv,m4v,mxf,nut,wtv,h264,hevc"
 
 
 class FfmpegError(Exception):
@@ -81,8 +87,8 @@ def downloaded_path() -> Path | None:
 
 
 def find(configured: str = "") -> Path | None:
-    """The ffmpeg to use: the one in the config file, then the downloaded one, then one
-    that's already installed. None if there isn't one yet."""
+    """The ffmpeg to use: the one in the config file, then the downloaded one, then (not on
+    Windows) one that's installed. None if there isn't one yet."""
     if configured:
         path = Path(configured).expanduser()
         if not path.is_file():
@@ -92,6 +98,10 @@ def find(configured: str = "") -> Path | None:
     downloaded = downloaded_path()
     if downloaded is not None and downloaded.is_file():
         return downloaded
+    if sys.platform == "win32":
+        # Windows looks in the current folder (often Downloads) first, and would run an
+        # ffmpeg.bat or ffmpeg.cmd too, so only the checked download is used.
+        return None
     installed = shutil.which("ffmpeg")
     if installed and _makes_h264(Path(installed)):
         return Path(installed)
@@ -174,7 +184,8 @@ _VIDEO_STREAM = re.compile(r"Stream #.*: Video: .*")
 def probe(ffmpeg: Path, path: Path) -> Probe:
     try:
         result = subprocess.run(
-            [str(ffmpeg), "-hide_banner", "-nostdin", "-i", str(path)], capture_output=True,
+            [str(ffmpeg), "-hide_banner", "-nostdin", "-format_whitelist", VIDEO_FORMATS,
+             "-i", str(path)], capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=60, creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError) as e:
@@ -208,6 +219,41 @@ def run(ffmpeg: Path, args: list[str], *, seconds: float | None = None,
                     progress(min(1.0, int(value) / 1_000_000 / seconds))
             exit_status = process.wait()
         finally:
+            if process.poll() is None:  # e.g. Ctrl+C
+                process.kill()
+                process.wait()
+        if exit_status != 0:
+            errors.seek(0)
+            message = errors.read().decode("utf-8", "replace").strip().splitlines()
+            raise FfmpegError(message[-1] if message else f"ffmpeg stopped ({exit_status}).")
+    if progress:
+        progress(1.0)
+
+
+def encode(ffmpeg: Path, frames: Iterable[bytes], frame_count: int, args: list[str],
+           progress: Callable[[float], None] | None = None) -> None:
+    """Feed raw video frames to ffmpeg one at a time (args says how to read them, with
+    "-i pipe:0"). Only a frame or two is ever in memory, however long the video is."""
+    command = [str(ffmpeg), "-hide_banner", "-y", "-v", "error", *args]  # no -nostdin
+    with tempfile.TemporaryFile() as errors:
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE,
+                                       stdout=subprocess.DEVNULL, stderr=errors,
+                                       creationflags=_NO_WINDOW)
+        except OSError as e:
+            raise FfmpegError(f"Couldn't run ffmpeg: {e}") from e
+        try:
+            for done, frame in enumerate(frames, start=1):
+                try:
+                    process.stdin.write(frame)
+                except OSError:  # it stopped reading because it failed; its message says why
+                    break
+                if progress and done % 25 == 0:
+                    progress(done / frame_count)
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+            exit_status = process.wait()
+        finally:  # also if making a frame failed
             if process.poll() is None:  # e.g. Ctrl+C
                 process.kill()
                 process.wait()

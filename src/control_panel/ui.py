@@ -68,8 +68,11 @@ def ask_password(prompt: str) -> str | None:
     return _answer(questionary.password(prompt, qmark=">", style=STYLE))
 
 
-def confirm(prompt: str, default: bool = True) -> bool:
-    return bool(_answer(questionary.confirm(prompt, default=default, qmark="?", style=STYLE)))
+def confirm(prompt: str, default: bool = True) -> bool | None:
+    """Yes or no. None (which also counts as no) if they press Ctrl+C, for when that
+    should mean 'stop' rather than 'no, carry on'."""
+    answer = _answer(questionary.confirm(prompt, default=default, qmark="?", style=STYLE))
+    return None if answer is None else bool(answer)
 
 
 def pause(prompt: str = "Press Enter to carry on.") -> None:

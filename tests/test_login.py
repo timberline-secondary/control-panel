@@ -150,3 +150,12 @@ def test_the_shared_saved_password_works_for_a_new_pi(pi):
     pi["keychain"][SHARED] = RIGHT
     assert login.connect(ThemesSettings(host="pi-tv4.hackerspace.tbl")).password == RIGHT
     assert pi["typed"] == []
+
+
+def test_only_one_other_pis_password_is_tried(pi):
+    login._remembered_this_run["pi@pi-tv1.hackerspace.tbl"] = "first"
+    login._remembered_this_run["pi@pi-tv2.hackerspace.tbl"] = "latest"
+    pi["keychain"][SHARED] = "saved"
+    pi["answers"] = [RIGHT]
+    assert login.connect(ThemesSettings()).password == RIGHT
+    assert pi["tried"] == ["latest", RIGHT]  # a new Pi doesn't get every password we know

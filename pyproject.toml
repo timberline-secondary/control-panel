@@ -44,7 +44,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src"]
-extend-exclude = ["panels", "main.py"]  # legacy app, see README
+extend-exclude = ["./panels", "./main.py"]  # the legacy app, see README
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

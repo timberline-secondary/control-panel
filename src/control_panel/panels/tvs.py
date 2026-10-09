@@ -13,7 +13,6 @@ import os
 import posixpath
 import re
 import shlex
-import shutil
 import socket
 import subprocess
 import sys
@@ -60,14 +59,33 @@ def parse_free_space(df_output: str) -> int | None:
         return None
 
 
-def shrine_names(file_names: list[str]) -> set[str]:
-    """The shrines some videos belong to: 'ann.lee.a.mp4' -> 'ann.lee'."""
-    names = set()
-    for file_name in file_names:
-        match = re.match(r"(.+?)\.[az]\.", file_name)
-        if match:
-            names.add(match[1])
+def shrine_name(folder_name: str, file_names: list[str]) -> str | None:
+    """Which shrine some videos are: the folder's name if they're all part of it (as when
+    this app made them), or else the name of their slideshow. None if it isn't clear."""
+    if file_names and all(shrine.is_part_of(f, folder_name) for f in file_names):
+        return folder_name
+    slideshows = [f.removesuffix(".a.mp4") for f in file_names if f.endswith(".a.mp4")]
+    if len(slideshows) == 1 and all(shrine.is_part_of(f, slideshows[0]) for f in file_names):
+        return slideshows[0]
+    return None
+
+
+def upload_names(videos: list[Path]) -> dict[Path, str]:
+    """The name each video gets on a TV: one the slideshow will play, and no two the same."""
+    names: dict[Path, str] = {}
+    for video in videos:
+        stem = shrine.clean_name(video.stem) or "video"
+        candidate, n = f"{stem}.mp4", 2
+        while candidate in names.values():
+            candidate, n = f"{stem}-{n}.mp4", n + 1
+        names[video] = candidate
     return names
+
+
+def is_safe_name(file_name: str) -> bool:
+    """Only plain names are copied from a TV: a name with '\\' in it could point outside
+    the folder on Windows."""
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", file_name)) and not file_name.startswith(".")
 
 
 def is_student(name: str) -> bool:
@@ -168,10 +186,10 @@ def connect(settings: TvsSettings, numbers: list[int] | tuple[int, ...]) -> dict
         except ConnectionFailed as e:
             ui.error(f"TV {number}: {e}")
             continue
-        if connection is None:  # they cancelled at the password prompt
+        if connection is None:  # they cancelled, at the password prompt or the like
             for tv in tvs.values():
                 tv.connection.close()
-            return {}
+            raise KeyboardInterrupt
         tvs[number] = TvPi(connection, number, settings)
     return tvs
 
@@ -319,14 +337,18 @@ def make_shrine(settings: TvsSettings) -> None:
         if not made:
             ui.error("Nothing could be made.")
             return
-        folder.mkdir(parents=True, exist_ok=True)
-        shrine.remove_old(folder, name)
-        for video in made:
-            shutil.move(video, folder / video.name)
+        while True:  # the new videos are only thrown away if they say so
+            try:
+                saved = shrine.save(made, folder, name)
+                break
+            except OSError as e:
+                ui.error(f"Couldn't save the shrine in {folder} ({e.strerror or e}). If one "
+                         "of its videos is open, e.g. in a video player, close it.")
+                if not ui.confirm("Try again?", default=True):
+                    return
     ui.success(f"Made {name}'s shrine, in {folder}:")
-    for video in videos_in(folder):
-        if shrine.is_part_of(video.name, name):
-            ui.info(f"  {video.name} ({size_text(video.stat().st_size)})")
+    for video in saved:
+        ui.info(f"  {video.name} ({size_text(video.stat().st_size)})")
     while True:
         next_step = ui.choose("What next?", [
             ui.choice("Put it on the TVs", "push"),
@@ -337,7 +359,7 @@ def make_shrine(settings: TvsSettings) -> None:
             open_folder(folder)
             continue
         if next_step == "push":
-            push_shrine(settings, folder)
+            push_shrine(settings, folder, name)
         return
 
 
@@ -381,7 +403,8 @@ def _ask_student() -> tuple[str, shrine.Title] | None:
     if grad is None:
         return None
     subject = ui.choose("Which subject?", [
-        *SUBJECT_CHOICES, ui.choice("Something else (type it)", "other"), ui.choice("Back", ui.BACK),
+        *SUBJECT_CHOICES, ui.choice("Something else (type it)", "other"),
+        ui.choice("Back", ui.BACK),
     ])
     if subject == "other":
         subject = ui.ask(f"The subject, as in 'The ___ of {shown or default_name}' {ui.QUIT_HINT}")
@@ -495,7 +518,9 @@ def _gather(ffmpeg_path: Path, source: str, work: Path, downloads: Path) -> list
 
 # --- Menu actions: the TVs -----------------------------------------------------------------
 
-def push_shrine(settings: TvsSettings, folder: Path | None = None) -> None:
+def push_shrine(settings: TvsSettings, folder: Path | None = None,
+                name: str | None = None) -> None:
+    """Copy a shrine's videos to the TVs. name: the shrine's, if known."""
     if folder is None:
         folder = _choose_shrine_folder(settings)
         if folder is None:
@@ -504,36 +529,46 @@ def push_shrine(settings: TvsSettings, folder: Path | None = None) -> None:
     if not videos:
         ui.error(f"There are no .mp4 videos in {folder}.")
         return
-    uploads = {video: shrine.clean_name(video.stem) + ".mp4" for video in videos}
+    uploads = upload_names(videos)
     ui.info(f"From {folder}:")
     for video, file_name in uploads.items():
         renamed = f" (as {file_name}, so the TVs can play it)" if file_name != video.name else ""
         ui.info(f"  {video.name}{renamed} ({size_text(video.stat().st_size)})")
 
-    names = shrine_names(list(uploads.values()))
-    suggested = suggested_tvs(next(iter(names))) if len(names) == 1 else []
+    name = name or shrine_name(folder.name, list(uploads.values()))
+    suggested = suggested_tvs(name) if name else []
     numbers = ui.choose_many("Which TVs should it go on?", [
         ui.choice(label, number, checked=number in suggested) for number, label in TVS.items()
     ], require_one=True)
     if not numbers:
         return
-    slideshows = {v: n for v, n in uploads.items() if ".a." in n}
     for_hallway = uploads
-    if HALLWAY in numbers and len(numbers) > 1 and slideshows and len(slideshows) < len(uploads):
-        if not ui.confirm("Put the videos on the hallway TV (4) too? It usually only gets the "
-                          "title slideshow.", default=False):
-            for_hallway = slideshows
+    slideshow = {v: f for v, f in uploads.items() if name and f == f"{name}.a.mp4"}
+    if HALLWAY in numbers and len(slideshow) < len(uploads):
+        answer = ui.confirm("Put the videos on the hallway TV (4) too? It usually only gets "
+                            "the title slideshow.", default=False)
+        if answer is None:
+            return
+        if not answer:
+            for_hallway = slideshow
 
     with connected(settings, numbers) as tvs:
         for number, tv in tvs.items():
-            _push_to(tv, for_hallway if number == HALLWAY else uploads, names)
+            going = for_hallway if number == HALLWAY else uploads
+            if not going:
+                ui.info(f"{tv.name}: nothing to copy (there's no title slideshow).")
+                continue
+            try:
+                _push_to(tv, going, name)
+            except (TvError, OSError, paramiko.SSHException) as e:
+                ui.error(f"{tv.name}: that didn't work ({e}).")
 
 
-def _push_to(tv: TvPi, uploads: dict[Path, str], names: set[str]) -> None:
+def _push_to(tv: TvPi, uploads: dict[Path, str], name: str | None) -> None:
     existing = tv.videos()
     new_names = set(uploads.values())
     old = sorted((f for f in existing
-                  if f in new_names or any(shrine.is_part_of(f, n) for n in names)),
+                  if f in new_names or (name and shrine.is_part_of(f, name))),
                  key=shrine.natural_key)
     replace_all = True
     if old:
@@ -544,33 +579,45 @@ def _push_to(tv: TvPi, uploads: dict[Path, str], names: set[str]) -> None:
             ui.choice("Replace them with the new ones", "replace"),
             ui.choice("Keep them, and add the new ones (any with the same name are replaced)",
                       "keep"),
-            ui.choice(f"Skip {tv.name}", ui.BACK),
+            ui.choice(f"Skip {tv.name}", "skip"),
         ])
         if answer is None:
+            raise KeyboardInterrupt  # Ctrl+C stops the whole push, not just this TV
+        if answer == "skip":
             return
         replace_all = answer == "replace"
-    going = [f for f in old if replace_all or f in new_names]
+    leaving = [f for f in old if replace_all and f not in new_names]  # replaced, not re-copied
 
     needed = sum(video.stat().st_size for video in uploads)
     free = tv.free_space()
-    if free is not None and free - SPARE_SPACE < needed:
-        freed = sum(existing[f] for f in going)
-        if free - SPARE_SPACE + freed < needed:
-            ui.error(f"{tv.name} doesn't have room: these need {size_text(needed)} and it has "
-                     f"{size_text(max(0, free - SPARE_SPACE))} to spare. Delete some old "
-                     "videos from it first.")
-            return
-        for file_name in going:  # make room first
-            tv.remove(file_name)
-    for video, file_name in uploads.items():
-        with ui.progress(f"{tv.name}: copying {file_name}") as update:
-            tv.upload(video, file_name, update)
-    still_there = tv.videos()
-    for file_name in going:
-        if file_name not in new_names and file_name in still_there:
-            tv.remove(file_name)
-    ui.success(f"{tv.name}: copied {len(uploads)} video(s).")
-    refresh(tv)
+    short = free is not None and free - SPARE_SPACE < needed
+    if short and free - SPARE_SPACE + sum(existing[f] for f in old if f in leaving
+                                          or f in new_names) < needed:
+        ui.error(f"{tv.name} doesn't have room: these need {size_text(needed)} and it has "
+                 f"{size_text(max(0, free - SPARE_SPACE))} to spare. Delete some old "
+                 "videos from it first.")
+        return
+    changed = False
+    try:
+        if short:  # make room, deleting only what's going anyway
+            for file_name in leaving:
+                tv.remove(file_name)
+                changed = True
+        for video, file_name in uploads.items():
+            if short and file_name in existing:
+                tv.remove(file_name)  # rather than keeping both while it copies
+            changed = True
+            with ui.progress(f"{tv.name}: copying {file_name}") as update:
+                tv.upload(video, file_name, update)
+        still_there = tv.videos()
+        for file_name in leaving:
+            if file_name in still_there:
+                tv.remove(file_name)
+        ui.success(f"{tv.name}: copied {len(uploads)} video(s).")
+    finally:
+        if changed:  # even if it stopped part way, so it plays what's there now
+            with contextlib.suppress(OSError, paramiko.SSHException):
+                refresh(tv)
 
 
 def _choose_shrine_folder(settings: TvsSettings) -> Path | None:
@@ -680,11 +727,18 @@ def _pick(videos: dict[str, int], verb: str) -> list[str]:
 
 
 def _copy_from(tv: TvPi, file_names: list[str], folder: Path) -> None:
+    for file_name in [n for n in file_names if not is_safe_name(n)]:
+        ui.warning(f"Skipping {file_name}: its name has characters that aren't safe to copy.")
+    file_names = [n for n in file_names if is_safe_name(n)]
     folder.mkdir(parents=True, exist_ok=True)
     already = [n for n in file_names if (folder / n).exists()]
-    if already and not ui.confirm(f"{len(already)} of these are already in {folder}. "
-                                  "Replace them?", default=True):
-        file_names = [n for n in file_names if n not in already]
+    if already:
+        replace = ui.confirm(f"{len(already)} of these are already in {folder}. Replace them?",
+                             default=True)
+        if replace is None:
+            return
+        if not replace:
+            file_names = [n for n in file_names if n not in already]
     for file_name in file_names:
         partial = folder / f".{file_name}.part"
         try:
@@ -729,6 +783,11 @@ def restart(settings: TvsSettings) -> None:
         tv = tvs[number]
         if what == "slideshow":
             refresh(tv)
+            return
+        if tv.usb_stick_plugged_in():
+            ui.warning(f"{tv.name} has a USB stick plugged in, so it wasn't rebooted: when it "
+                       "starts, Raspberry Slideshow would replace the videos with what's on "
+                       "the stick. Unplug it, then try again.")
             return
         try:
             result = tv.reboot()
