@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 dependencies = [
     "keyring>=25",
     "paramiko>=3.4",
+    "pillow>=11",
     "questionary>=2.0",
 ]
 

@@ -6,6 +6,7 @@ from control_panel.ssh import AuthenticationFailed, ConnectionFailed, HostKeyCha
 
 RIGHT = "hunter2"
 ACCOUNT = "pi@pi-themes.hackerspace.tbl"
+SHARED = "pi@any-hackerspace-pi"
 
 
 @pytest.fixture
@@ -64,7 +65,7 @@ def test_password_from_config_is_used_without_asking(pi):
 def test_asks_again_after_a_wrong_password_then_remembers_it(pi):
     pi["answers"] = ["oops", RIGHT]
     assert login.connect(ThemesSettings()).password == RIGHT
-    assert pi["keychain"] == {ACCOUNT: RIGHT}
+    assert pi["keychain"] == {ACCOUNT: RIGHT, SHARED: RIGHT}
     # Second time in the same run: no questions, and no second offer to remember it.
     assert login.connect(ThemesSettings()).password == RIGHT
     assert pi["typed"] == ["oops", RIGHT]
@@ -127,3 +128,25 @@ def test_not_trusting_a_changed_pi_sends_no_password(pi):
     assert login.connect(ThemesSettings(password=RIGHT)) is None
     assert pi["forgot_host"] == []
     assert pi["tried"] == [RIGHT]  # the attempt that found the changed key; nothing more
+
+
+def test_a_password_that_worked_on_another_pi_is_tried_first(pi):
+    pi["answers"] = [RIGHT]
+    login.connect(ThemesSettings())
+    tv = ThemesSettings(host="pi-tv1.hackerspace.tbl")
+    assert login.connect(tv).password == RIGHT
+    assert pi["typed"] == [RIGHT]  # asked once, for the first Pi only
+
+
+def test_another_pis_password_that_fails_is_tried_quietly(pi):
+    login._remembered_this_run["pi@pi-tv1.hackerspace.tbl"] = "different"
+    pi["answers"] = [RIGHT]
+    assert login.connect(ThemesSettings()).password == RIGHT
+    assert pi["tried"] == ["different", RIGHT]
+    assert pi["errors"] == []  # it was only a guess
+
+
+def test_the_shared_saved_password_works_for_a_new_pi(pi):
+    pi["keychain"][SHARED] = RIGHT
+    assert login.connect(ThemesSettings(host="pi-tv4.hackerspace.tbl")).password == RIGHT
+    assert pi["typed"] == []

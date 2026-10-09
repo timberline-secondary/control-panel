@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import posixpath
 import socket
+import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -151,12 +153,30 @@ class PiConnection:
     def listdir(self, path: str) -> list[str]:
         return self.sftp.listdir(path)
 
-    def upload(self, fileobj: BinaryIO, remote_path: str) -> None:
-        """Upload under a temporary name, then rename, so nothing sees a half-written file."""
+    def file_sizes(self, path: str) -> dict[str, int]:
+        """{name: size in bytes} for the files (not folders) in a folder."""
+        return {a.filename: a.st_size or 0 for a in self.sftp.listdir_attr(path)
+                if a.st_mode is not None and stat.S_ISREG(a.st_mode)}
+
+    def download(self, remote_path: str, local_path: Path,
+                 progress: Callable[[int, int], None] | None = None) -> None:
+        self.sftp.get(remote_path, str(local_path), callback=progress)
+
+    def remove(self, remote_path: str) -> None:
+        self.sftp.remove(remote_path)
+
+    def upload(self, fileobj: BinaryIO, remote_path: str,
+               progress: Callable[[int, int], None] | None = None) -> None:
+        """Upload under a temporary name, then rename, so nothing sees a half-written file.
+
+        progress(bytes sent, total) is called as it goes, if given.
+        """
         directory, name = posixpath.split(remote_path)
         partial = posixpath.join(directory, f".{name}.part")
         try:
-            self.sftp.putfo(fileobj, partial)
+            size = fileobj.seek(0, 2)  # so progress knows the total
+            fileobj.seek(0)
+            self.sftp.putfo(fileobj, partial, file_size=size, callback=progress)
             self.sftp.posix_rename(partial, remote_path)
         except BaseException:
             try:
