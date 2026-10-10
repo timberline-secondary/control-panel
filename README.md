@@ -62,7 +62,8 @@ videos made on your computer:
 
 | Menu item | What it does |
 | --- | --- |
-| Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). Pictures are shown in the order of their names, and subfolders are included. The student's own files are never moved or changed. The videos are saved in `Documents\Hackerspace shrines\<name>`. Making it again replaces it, e.g. after adding a new piece. |
+| Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). Pictures are shown in the order of their names, and subfolders are included. The student's own files are never moved or changed. The videos are saved in `Documents\Hackerspace shrines\<name>`, and the original pictures are kept on pi-files (below). Making it again starts it over. |
+| Add art to a shrine | Type part of the student's username, then drag in or paste their new art. Their slideshow is made again from the original pictures kept on pi-files plus the new ones, and only the new or changed videos are copied to the TVs (the same ones it was on before). For a shrine made before pi-files, choose *Get it from a TV*: its pictures are taken out of the slideshow on the TV once, and kept on pi-files from then on. |
 | Put a shrine on the TVs | Suggests the TV from the student's last name, plus the hallway. Shows what that student already has on each TV and asks whether to replace it. Checks there's room, copies the videos, then restarts the slideshow so it plays them. |
 | See, copy or delete the videos on a TV | List and search a TV's videos, copy some to this computer, or delete some. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |
@@ -74,6 +75,25 @@ that would make every start slower. Making a shrine takes a minute or two.
 
 The slideshow isn't restarted if a USB stick is plugged in to that TV Pi, because Raspberry
 Slideshow would then replace the videos with what's on the stick.
+
+#### pi-files (the art server)
+
+A slideshow is a video, and a picture taken back out of a video is a little blurrier each time,
+so each shrine's original pictures are kept on **pi-files**, a Raspberry Pi with an external drive.
+*Add art to a shrine* needs it; *Make a shrine* asks before going ahead without it. On its drive:
+
+```
+/mnt/ssd/shrines/<name>/shrine.json   what's in the shrine (title card, pictures in order, TVs)
+/mnt/ssd/shrines/<name>/pictures/     the original pictures
+/mnt/ssd/shrines/<name>/videos/       the videos made for the TVs
+/mnt/ssd/shrines/.replaced/           shrines that were made again from scratch (never deleted)
+```
+
+To set one up: Raspberry Pi OS Lite, with the hostname `pi-files`, the user `pi` with the same
+password as the TVs, and SSH turned on (all in Raspberry Pi Imager's settings). Format the drive as
+ext4 and mount it at `/mnt/ssd` from `/etc/fstab` (with `nofail`, so the Pi still starts without
+it). The app makes `/mnt/ssd/shrines` the first time it's used, and won't keep art anywhere that
+isn't on the external drive. It's worth backing up the drive now and then.
 
 ### Grade 9 mode
 
@@ -110,6 +130,8 @@ username = "pi"                     # the TVs share a login
 media_dir = "/home/pi/rs_media"     # the folder Raspberry Slideshow plays
 shrines_dir = ""                    # where shrines are saved; empty means Documents\Hackerspace shrines
 ffmpeg = ""                         # an ffmpeg.exe to use; empty means download it when needed
+art_host = "pi-files.hackerspace.tbl"  # the Pi that keeps the shrines' art (same login as the TVs)
+art_dir = "/mnt/ssd/shrines"        # where, on its external drive
 ```
 
 The Pis usually share a password, so once you've typed it for one Pi, the app tries it on the

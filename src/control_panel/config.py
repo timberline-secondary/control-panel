@@ -56,10 +56,18 @@ class TvsSettings:
     media_dir: str = "/home/pi/rs_media"  # the folder Raspberry Slideshow plays
     shrines_dir: str = ""  # where shrines are saved; empty means Documents/Hackerspace shrines
     ffmpeg: str = ""  # ffmpeg program to use; empty means download it when it's first needed
+    # The Pi that keeps each shrine's original art (with the same login as the TVs), and
+    # the folder on its external drive where it's kept.
+    art_host: str = "pi-files.hackerspace.tbl"
+    art_dir: str = "/mnt/ssd/shrines"
 
     def pi(self, number: int) -> PiSettings:
         return PiSettings(host=self.host_pattern.format(n=number), port=self.port,
                           username=self.username, password=self.password)
+
+    def art_pi(self) -> PiSettings:
+        return PiSettings(host=self.art_host, port=self.port, username=self.username,
+                          password=self.password)
 
 
 @dataclass(frozen=True)

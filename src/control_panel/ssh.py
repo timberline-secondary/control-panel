@@ -165,6 +165,21 @@ class PiConnection:
     def remove(self, remote_path: str) -> None:
         self.sftp.remove(remote_path)
 
+    def mkdir(self, remote_path: str) -> None:
+        """Make a folder, if it isn't there already."""
+        try:
+            self.sftp.mkdir(remote_path)
+        except OSError:
+            if not self.exists(remote_path):
+                raise
+
+    def rename(self, old_path: str, new_path: str) -> None:
+        self.sftp.posix_rename(old_path, new_path)
+
+    def read_bytes(self, remote_path: str) -> bytes:
+        with self.sftp.open(remote_path, "rb") as f:
+            return f.read()
+
     def upload(self, fileobj: BinaryIO, remote_path: str,
                progress: Callable[[int, int], None] | None = None) -> None:
         """Upload under a temporary name, then rename, so nothing sees a half-written file.

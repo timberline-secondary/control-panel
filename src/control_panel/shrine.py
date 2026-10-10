@@ -548,11 +548,13 @@ Progress = Callable[[str], AbstractContextManager[Callable[[float], None]]]
 
 
 def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
-         work_dir: Path, progress: Progress) -> tuple[list[Path], list[Skipped]]:
+         work_dir: Path, progress: Progress,
+         taken: set[str] | None = None) -> tuple[list[Path], list[Skipped]]:
     """Make the shrine's videos in work_dir. Returns (the videos, what couldn't be used).
 
     progress(label) is a context manager giving a function to report progress (0 to 1).
     One file that can't be used is reported, rather than stopping the whole shrine.
+    taken: video names the shrine already has, so new ones don't replace them.
     """
     made: list[Path] = []
     problems: list[Skipped] = []
@@ -586,7 +588,7 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
         except Exception as e:
             problems.append(Skipped("the slideshow", f"couldn't make it ({e})"))
 
-    taken: set[str] = set()
+    taken = set(taken or ())
     for item in (m for m in media if m.kind in (VIDEO, ANIMATION)):
         output = work_dir / video_file_name(name, item.label, taken)
         try:
@@ -620,14 +622,17 @@ def _convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
     shutil.rmtree(folder, ignore_errors=True)
 
 
-def save(made: list[Path], folder: Path, name: str) -> list[Path]:
-    """Copy newly made videos into folder, in place of the shrine's old ones there.
+def save(made: list[Path], folder: Path, name: str, replace_all: bool = True) -> list[Path]:
+    """Copy newly made videos into folder, in place of the shrine's old ones there (or, with
+    replace_all=False, only the ones with the same names, as when adding art).
 
     All or nothing: if something's in the way (e.g. Windows won't let go of an old video
     because it's open in a video player), OSError is raised and the folder is as it was.
     """
     folder.mkdir(parents=True, exist_ok=True)
-    old = [path for path in folder.glob("*.mp4") if is_part_of(path.name, name)]
+    new_names = {video.name for video in made}
+    old = [path for path in folder.glob("*.mp4") if is_part_of(path.name, name)
+           and (replace_all or path.name in new_names)]
     aside: list[tuple[Path, Path]] = []
     placed: list[Path] = []
     try:
@@ -671,3 +676,30 @@ def is_part_of(file_name: str, name: str) -> bool:
     video = file_name[len(prefix):-len(".mp4")]
     # The old control panel kept the original name: name.z.IMG_1234.MOV.mp4
     return bool(video) and ("." not in video or bool(_LEGACY_VIDEO.fullmatch(video)))
+
+
+def extract_slides(ffmpeg_path: Path, slideshow: Path, folder: Path,
+                   progress: Callable[[float], None] | None = None) -> list[Path]:
+    """Take the slides back out of a shrine's slideshow (one already on a TV, say).
+
+    Each slide is on screen for 8 seconds, so the frame from the middle of each is saved.
+    (The video is compressed, so these are a little less sharp than the originals.) Works
+    for slideshows made by the old control panels too: 8n+1 or 8n seconds long.
+    """
+    seconds = ffmpeg.probe(ffmpeg_path, slideshow).duration or 0
+    count = round(seconds / SECONDS_PER_PICTURE)
+    if count < 1 or min(abs(seconds - SECONDS_PER_PICTURE * count),
+                        abs(seconds - slideshow_seconds(count))) > 1.5:
+        raise ShrineError(f"{slideshow.name} doesn't look like a shrine slideshow "
+                          f"(it's {seconds:.0f} seconds long).")
+    folder.mkdir(parents=True, exist_ok=True)
+    slides = []
+    for k in range(count):
+        slide = folder / f"from-tv-{k + 1:04d}.png"
+        middle = SECONDS_PER_PICTURE * k + (SECONDS_PER_PICTURE + FADE_SECONDS) / 2
+        ffmpeg.run(ffmpeg_path, ["-ss", f"{middle:.2f}", "-format_whitelist", "mov",
+                                 "-i", str(slideshow), "-frames:v", "1", str(slide)])
+        slides.append(slide)
+        if progress:
+            progress((k + 1) / count)
+    return slides

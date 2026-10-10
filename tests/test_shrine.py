@@ -461,3 +461,47 @@ def test_make_a_title_only_shrine(tmp_path, ffmpeg_path):
                                  no_progress)
     assert [p.name for p in made] == ["ann.lee.a.mp4"] and not problems
     assert _duration(ffmpeg_path, made[0]) == pytest.approx(9, abs=0.1)
+
+
+def test_extract_slides_from_a_slideshow(tmp_path, ffmpeg_path):
+    slides = []
+    for colour in ["red", "lime", "blue"]:
+        slides.append(tmp_path / f"{colour}.png")
+        Image.new("RGB", (1920, 1080), colour).save(slides[-1], compress_level=1)
+    video = tmp_path / "ann.lee.a.mp4"
+    from control_panel import ffmpeg
+    ffmpeg.encode(ffmpeg_path, shrine.slideshow_frames(slides), 25 * shrine.slideshow_seconds(3),
+                  shrine.slideshow_args(video))
+    got = shrine.extract_slides(ffmpeg_path, video, tmp_path / "slides")
+    assert [p.name for p in got] == ["from-tv-0001.png", "from-tv-0002.png", "from-tv-0003.png"]
+    colours = [Image.open(p).convert("RGB").getpixel((960, 540)) for p in got]
+    for colour, expected in zip(colours, [(255, 0, 0), (0, 255, 0), (0, 0, 255)], strict=True):
+        assert colour == pytest.approx(expected, abs=8)
+
+
+def test_extract_slides_refuses_other_videos(tmp_path, ffmpeg_path):
+    video = tmp_path / "clip.mp4"
+    subprocess.run([str(ffmpeg_path), "-v", "error", "-f", "lavfi", "-i",
+                    "color=black:size=64x48:rate=25:duration=13", str(video)], check=True)
+    with pytest.raises(ShrineError, match="doesn't look like a shrine slideshow"):
+        shrine.extract_slides(ffmpeg_path, video, tmp_path / "slides")
+
+
+def test_save_when_adding_keeps_the_other_videos(tmp_path):
+    folder = tmp_path / "ann.lee"
+    folder.mkdir()
+    for name in ["ann.lee.a.mp4", "ann.lee.z.cat.mp4"]:
+        (folder / name).write_bytes(b"old")
+    (tmp_path / "ann.lee.a.mp4").write_bytes(b"new")
+    shrine.save([tmp_path / "ann.lee.a.mp4"], folder, "ann.lee", replace_all=False)
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == {
+        "ann.lee.a.mp4": b"new", "ann.lee.z.cat.mp4": b"old"}
+
+
+def test_new_videos_dont_take_the_names_of_old_ones(tmp_path, ffmpeg_path):
+    frames = [Image.new("RGB", (16, 16), c) for c in ("red", "green")]
+    frames[0].save(tmp_path / "cat.gif", save_all=True, append_images=frames[1:], duration=500)
+    made, _ = shrine.make(ffmpeg_path, "ann.lee", None,
+                          [shrine.Media(tmp_path / "cat.gif", ANIMATION, "cat.gif")],
+                          tmp_path / "work", no_progress, taken={"ann.lee.z.cat.mp4"})
+    assert [p.name for p in made] == ["ann.lee.z.cat-2.mp4"]
