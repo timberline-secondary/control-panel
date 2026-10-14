@@ -158,6 +158,16 @@ class PiConnection:
         return {a.filename: a.st_size or 0 for a in self.sftp.listdir_attr(path)
                 if a.st_mode is not None and stat.S_ISREG(a.st_mode)}
 
+    def list_folder(self, path: str) -> tuple[list[str], dict[str, int]]:
+        """(the folders in a folder, {name: size in bytes} for its files)."""
+        folders, files = [], {}
+        for a in self.sftp.listdir_attr(path):
+            if a.st_mode is not None and stat.S_ISDIR(a.st_mode):
+                folders.append(a.filename)
+            elif a.st_mode is not None and stat.S_ISREG(a.st_mode):
+                files[a.filename] = a.st_size or 0
+        return folders, files
+
     def download(self, remote_path: str, local_path: Path,
                  progress: Callable[[int, int], None] | None = None) -> None:
         self.sftp.get(remote_path, str(local_path), callback=progress)
@@ -175,10 +185,6 @@ class PiConnection:
 
     def rename(self, old_path: str, new_path: str) -> None:
         self.sftp.posix_rename(old_path, new_path)
-
-    def read_bytes(self, remote_path: str) -> bytes:
-        with self.sftp.open(remote_path, "rb") as f:
-            return f.read()
 
     def upload(self, fileobj: BinaryIO, remote_path: str,
                progress: Callable[[int, int], None] | None = None) -> None:

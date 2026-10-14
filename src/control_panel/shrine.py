@@ -676,30 +676,3 @@ def is_part_of(file_name: str, name: str) -> bool:
     video = file_name[len(prefix):-len(".mp4")]
     # The old control panel kept the original name: name.z.IMG_1234.MOV.mp4
     return bool(video) and ("." not in video or bool(_LEGACY_VIDEO.fullmatch(video)))
-
-
-def extract_slides(ffmpeg_path: Path, slideshow: Path, folder: Path,
-                   progress: Callable[[float], None] | None = None) -> list[Path]:
-    """Take the slides back out of a shrine's slideshow (one already on a TV, say).
-
-    Each slide is on screen for 8 seconds, so the frame from the middle of each is saved.
-    (The video is compressed, so these are a little less sharp than the originals.) Works
-    for slideshows made by the old control panels too: 8n+1 or 8n seconds long.
-    """
-    seconds = ffmpeg.probe(ffmpeg_path, slideshow).duration or 0
-    count = round(seconds / SECONDS_PER_PICTURE)
-    if count < 1 or min(abs(seconds - SECONDS_PER_PICTURE * count),
-                        abs(seconds - slideshow_seconds(count))) > 1.5:
-        raise ShrineError(f"{slideshow.name} doesn't look like a shrine slideshow "
-                          f"(it's {seconds:.0f} seconds long).")
-    folder.mkdir(parents=True, exist_ok=True)
-    slides = []
-    for k in range(count):
-        slide = folder / f"from-tv-{k + 1:04d}.png"
-        middle = SECONDS_PER_PICTURE * k + (SECONDS_PER_PICTURE + FADE_SECONDS) / 2
-        ffmpeg.run(ffmpeg_path, ["-ss", f"{middle:.2f}", "-format_whitelist", "mov",
-                                 "-i", str(slideshow), "-frames:v", "1", str(slide)])
-        slides.append(slide)
-        if progress:
-            progress((k + 1) / count)
-    return slides

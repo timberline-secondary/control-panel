@@ -1,4 +1,5 @@
 import contextlib
+import io
 import posixpath
 import sys
 from pathlib import Path
@@ -9,7 +10,7 @@ from fakes import FakeFilesConnection
 from PIL import Image
 
 from control_panel import ffmpeg, shrine, ui
-from control_panel.art import ArtServer, Record
+from control_panel.art import ArtError, ArtFolder, ArtServer
 from control_panel.config import TvsSettings
 from control_panel.panels import grade9, tvs
 from control_panel.panels.tvs import TvError, TvPi
@@ -566,7 +567,14 @@ def no_pi_files(monkeypatch):
     monkeypatch.setattr(tvs, "art_server", fake)
 
 
-def test_make_a_shrine_then_make_it_again(tmp_path, monkeypatch, ffmpeg_path, pi_files):
+ANN = ArtFolder(1, "/mnt/ssd/tv1/ann.lee", "ann.lee")
+
+
+def kept_files(server, folder="/mnt/ssd/tv1/ann.lee"):
+    return sorted(server.files(ArtFolder(1, folder, posixpath.basename(folder))))
+
+
+def test_make_a_shrine_then_start_it_over(tmp_path, monkeypatch, ffmpeg_path, pi_files):
     art = tmp_path / "Ann's art"
     art.mkdir()
     Image.new("RGB", (40, 30), "red").save(art / "one.jpg")
@@ -580,38 +588,58 @@ def test_make_a_shrine_then_make_it_again(tmp_path, monkeypatch, ffmpeg_path, pi
     screen.finished()
     made = tmp_path / "shrines" / "ann.lee"
     assert sorted(p.name for p in made.iterdir()) == ["ann.lee.a.mp4", "ann.lee.z.spin.mp4"]
-    record = pi_files.load("ann.lee")  # its art is kept on pi-files
-    assert record.title == shrine.Title("Ann Lee", "Digital Art", "2027")
-    assert record.pictures == ["0001-one.jpg"] and record.videos == ["ann.lee.z.spin.mp4"]
+    # Its art is kept on pi-files, in TV 1's folder (last names A-L), with its title card.
+    assert kept_files(pi_files) == ["ann.lee.a.title.png", "ann.lee.z.one.jpg",
+                                    "ann.lee.z.spin.gif"]
+    card = pi_files.connection.files["/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png"]
+    assert Image.open(io.BytesIO(card)).size == (1920, 1080)
 
-    (art / "spin.gif").unlink()  # the old video should go when it's made again
-    screen = Screen(monkeypatch, chooses=["student", "Digital Art", None],
-                    asks=["ann.lee", "Ann", "", str(art), ""], confirms=[True, True])
+    (art / "spin.gif").unlink()  # the old video should go when it's started over
+    screen = Screen(monkeypatch, chooses=["student", "over", "Digital Art", None],
+                    asks=["ann.lee", "Ann", "", str(art), ""])
     tvs.make_shrine(settings)
     screen.finished()
+    assert "already has art for ann.lee" in screen.shown("info")
     assert sorted(p.name for p in made.iterdir()) == ["ann.lee.a.mp4"]
-    assert "add to it, use 'Add art to a shrine'" in screen.shown("warning")
-    assert pi_files.load("ann.lee").videos == []
-    assert pi_files.connection.listdir("/mnt/ssd/shrines/.replaced")  # old art kept aside
+    assert kept_files(pi_files) == ["ann.lee.a.title.png", "ann.lee.z.one.jpg"]
+    aside = pi_files.connection.list_folder("/mnt/ssd/.replaced")[0]  # old art kept aside
+    assert len(aside) == 1 and aside[0].startswith("ann.lee-")
 
 
-def test_making_again_can_be_called_off_to_keep_the_art(tmp_path, monkeypatch, pi_files):
-    pi_files.save_record(Record("ann.lee", None, ["0001-a.png"]))
+def test_making_a_shrine_pi_files_has_can_add_to_it(tmp_path, monkeypatch, pi_files):
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png")
     monkeypatch.setattr(tvs.ffmpeg, "find", lambda configured: Path("ffmpeg"))
-    screen = Screen(monkeypatch, chooses=["student", "Digital Art"], asks=["ann.lee", "", ""],
-                    confirms=[False])
+    added = []
+    monkeypatch.setattr(tvs, "_add_to", lambda settings, ffmpeg_path, server, target:
+                        added.append(target))
+    screen = Screen(monkeypatch, chooses=["student", "add"], asks=["ann.lee"])
     tvs.make_shrine(TvsSettings(shrines_dir=str(tmp_path / "shrines")))
     screen.finished()
-    assert pi_files.load("ann.lee").pictures == ["0001-a.png"]
+    assert added == [ANN]
 
 
 def test_without_pi_files_it_asks_first(tmp_path, monkeypatch, no_pi_files):
     monkeypatch.setattr(tvs.ffmpeg, "find", lambda configured: Path("ffmpeg"))
-    screen = Screen(monkeypatch, chooses=["student", "Digital Art"], asks=["ann.lee", "", ""],
-                    confirms=[False])
+    screen = Screen(monkeypatch, chooses=["student"], asks=["ann.lee"], confirms=[False])
     tvs.make_shrine(TvsSettings(shrines_dir=str(tmp_path / "shrines")))
     screen.finished()
     assert not (tmp_path / "shrines").exists()
+
+
+def test_art_follows_a_shrine_to_another_tv(tmp_path, monkeypatch, ffmpeg_path, pi_files):
+    art = tmp_path / "art"
+    art.mkdir()
+    Image.new("RGB", (40, 30), "red").save(art / "one.jpg")
+    tv3 = FakeTvConnection()
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {3: TvPi(tv3, 3, settings)})
+    screen = Screen(monkeypatch, chooses=["student", "Digital Art", "push"],
+                    asks=["ann.lee", "", "", str(art), ""], ticks=[[3]])
+    tvs.make_shrine(TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path)))
+    screen.finished()
+    assert set(tv3.files) == {"ann.lee.a.mp4"}
+    assert kept_files(pi_files, "/mnt/ssd/tv3/ann.lee") == ["ann.lee.a.title.png",
+                                                            "ann.lee.z.one.jpg"]
+    assert not pi_files.connection.exists("/mnt/ssd/tv1/ann.lee")
 
 
 @pytest.mark.parametrize("chooses, asks", [
@@ -630,11 +658,27 @@ def test_making_a_shrine_can_always_be_left(tmp_path, monkeypatch, chooses, asks
     tvs.make_shrine(settings)
     screen.finished()
     assert not (tmp_path / "shrines").exists()
+    assert pi_files.connection.files == {}
 
 
 def test_collection_names_never_have_dots(monkeypatch):
     Screen(monkeypatch, asks=["St. Patrick's Day 2026"], chooses=["none"])
-    assert tvs._ask_collection() == ("st-patricks-day-2026", None)
+    assert tvs._ask_collection_name() == ("st-patricks-day-2026", "St. Patrick's Day 2026")
+    assert tvs._ask_title("st-patricks-day-2026", "St. Patrick's Day 2026") == (None,)
+
+
+def test_pi_files_that_cant_be_used_is_explained(monkeypatch):
+    screen = Screen(monkeypatch)
+    monkeypatch.setattr(tvs, "_reach_problem", lambda host, port: None)
+    monkeypatch.setattr(tvs.login, "connect", lambda settings: None)  # no password given
+    with tvs.art_server(TvsSettings()) as server:
+        assert server is None
+    connection = FakeFilesConnection(mounted=False)
+    monkeypatch.setattr(tvs.login, "connect", lambda settings: connection)
+    with tvs.art_server(TvsSettings()) as server:
+        assert server is None
+    assert "not logged in" in screen.shown("warning")
+    assert "isn't on the external drive" in screen.shown("warning")
 
 
 def test_ffmpeg_is_offered_once(monkeypatch, tmp_path):
@@ -670,22 +714,26 @@ def test_grade_9_mode(monkeypatch, engage, tvs_on, volume):
 
 # --- Adding art ----------------------------------------------------------------------------
 
-def _slideshow(ffmpeg_path, path, colours):
-    """A real shrine slideshow with one slide per colour."""
-    slides = []
-    for i, colour in enumerate(colours):
-        slides.append(path.parent / f"slide-{i}.png")
-        Image.new("RGB", (1920, 1080), colour).save(slides[-1], compress_level=1)
-    ffmpeg.encode(ffmpeg_path, shrine.slideshow_frames(slides),
-                  25 * shrine.slideshow_seconds(len(slides)), shrine.slideshow_args(path))
+def _picture(path, colour, size=(40, 30)):
+    Image.new("RGB", size, colour).save(path)
     return path.read_bytes()
 
 
 def _new_art(tmp_path):
     art = tmp_path / "new art"
     art.mkdir()
-    Image.new("RGB", (40, 30), "blue").save(art / "new.png")
+    _picture(art / "new.png", "blue")
+    frames = [Image.new("RGB", (16, 16), c) for c in ("red", "green")]
+    frames[0].save(art / "clip.gif", save_all=True, append_images=frames[1:], duration=500)
     return art
+
+
+def _colour_at(ffmpeg_path, data, seconds, tmp_path):
+    video, frame = tmp_path / "check.mp4", tmp_path / f"check-{seconds}.png"
+    video.write_bytes(data)
+    ffmpeg.run(ffmpeg_path, ["-ss", str(seconds), "-i", str(video), "-frames:v", "1",
+                             str(frame)])
+    return Image.open(frame).convert("RGB").getpixel((960, 540))
 
 
 def _duration(ffmpeg_path, data, tmp_path):
@@ -694,63 +742,84 @@ def _duration(ffmpeg_path, data, tmp_path):
     return ffmpeg.probe(ffmpeg_path, video).duration
 
 
-def test_add_art_to_a_shrine_on_pi_files(tmp_path, monkeypatch, ffmpeg_path, pi_files):
-    record = Record("ann.lee", shrine.Title("Ann Lee", "Digital Art", "2027"), tvs=[1])
-    old = tmp_path / "old.png"
-    Image.new("RGB", (40, 30), "red").save(old)
-    pi_files.add_pictures(record, [(old, "old.png")])
-    pi_files.save_record(record)
+def test_add_art_makes_the_slideshow_again_from_pi_files(tmp_path, monkeypatch, ffmpeg_path,
+                                                         pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png",
+              _picture(tmp_path / "title.png", "white", (1920, 1080)))
+    files.add("/mnt/ssd/tv1/ann.lee/old.jpg", _picture(tmp_path / "old.jpg", "red"))
+    files.add("/mnt/ssd/tv1/ann.lee.z.clip.avi", b"a video, as hightower kept them")
     tv1 = FakeTvConnection(files={"ann.lee.a.mp4": b"old slideshow",
                                   "ann.lee.z.dance.mp4": b"dance", "bob.ng.a.mp4": b"bob"})
+    tv4 = FakeTvConnection(files={"ann.lee.a.mp4": b"old slideshow"})
     monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {
-        1: TvPi(tv1, 1, settings)})
+        n: TvPi(c, n, settings) for n, c in ((1, tv1), (4, tv4)) if n in numbers})
     screen = Screen(monkeypatch, asks=["ann", f'"{_new_art(tmp_path)}"', ""],
-                    chooses=["ann.lee"], ticks=[Screen.DEFAULT])
+                    chooses=[ANN], ticks=[Screen.DEFAULT], confirms=[False])
     settings = TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path))
     tvs.add_art(settings)
     screen.finished()
-    assert screen.ticked_at_first == [[1]]  # where it was before
-    assert set(tv1.files) == {"ann.lee.a.mp4", "ann.lee.z.dance.mp4", "bob.ng.a.mp4"}
-    # The title card, the old picture and the new one:
+    assert screen.ticked_at_first == [[1, 4]]  # its TV, and the hallway
+    assert kept_files(pi_files) == ["ann.lee.a.title.png", "ann.lee.z.clip.gif",
+                                    "ann.lee.z.new.png", "old.jpg"]
+    # The new video doesn't take the name of the one kept loose in tv1.
+    assert set(tv1.files) == {"ann.lee.a.mp4", "ann.lee.z.dance.mp4", "ann.lee.z.clip-2.mp4",
+                              "bob.ng.a.mp4"}
+    assert set(tv4.files) == {"ann.lee.a.mp4"}
+    slideshow = tv1.files["ann.lee.a.mp4"]
+    assert tv4.files["ann.lee.a.mp4"] == slideshow
+    # The title card, then the pictures in the order of their names: new, then old.
+    assert _duration(ffmpeg_path, slideshow, tmp_path) == pytest.approx(8 * 3 + 1, abs=0.1)
+    colours = [_colour_at(ffmpeg_path, slideshow, s, tmp_path) for s in (4.5, 12.5, 20.5)]
+    for colour, expected in zip(colours, [(255, 255, 255), (0, 0, 255), (255, 0, 0)],
+                                strict=True):
+        assert colour == pytest.approx(expected, abs=8)
+
+
+def test_add_art_can_make_a_missing_title_card(tmp_path, monkeypatch, ffmpeg_path, pi_files):
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/old.jpg", _picture(tmp_path / "o.jpg", "red"))
+    tv1 = FakeTvConnection()
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {1: TvPi(tv1, 1, settings)})
+    new = tmp_path / "new.png"
+    _picture(new, "blue")
+    screen = Screen(monkeypatch, asks=["ann", "", "", str(new), ""], chooses=[ANN, "Digital Art"],
+                    confirms=[True], ticks=[[1]])
+    tvs.add_art(TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path)))
+    screen.finished()
+    assert kept_files(pi_files) == ["ann.lee.a.title.png", "ann.lee.z.new.png", "old.jpg"]
     assert _duration(ffmpeg_path, tv1.files["ann.lee.a.mp4"], tmp_path) == \
         pytest.approx(8 * 3 + 1, abs=0.1)
-    assert pi_files.load("ann.lee").pictures == ["0001-old.png", "0002-new.png"]
-    assert pi_files.load("ann.lee").tvs == [1]
 
 
-def test_add_art_to_a_shrine_thats_only_on_a_tv(tmp_path, monkeypatch, ffmpeg_path, pi_files):
-    old_slideshow = _slideshow(ffmpeg_path, tmp_path / "legacy.mp4", ["white", "red"])
-    tv2 = FakeTvConnection(files={"zed.moore.a.mp4": old_slideshow,
-                                  "zed.moore.z.cat.mp4": b"cat"})
-    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {
-        2: TvPi(tv2, 2, settings)})
-    screen = Screen(monkeypatch, asks=["zed", f'"{_new_art(tmp_path)}"', ""],
-                    chooses=["tv", 2, "zed.moore"], ticks=[Screen.DEFAULT])
-    settings = TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path))
-    tvs.add_art(settings)
+def test_art_already_on_pi_files_isnt_added_again(tmp_path, monkeypatch, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.sun.jpg", b"sun")
+    files.add("/mnt/ssd/tv1/ann.lee/moon.jpg", b"moon")
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.star.jpg", b"star")
+    local = {}
+    for name, data in [("Sun.jpg", b"sun"), ("moon.jpg", b"new moon"), ("star.jpg", b"new star"),
+                       ("comet.jpg", b"comet")]:
+        local[name] = tmp_path / name
+        local[name].write_bytes(data)
+    media = [shrine.Media(path, shrine.PICTURE, f"art/{name}") for name, path in local.items()]
+    screen = Screen(monkeypatch, confirms=[True, False])  # replace the moon; keep both stars
+    new, replaced = tvs._plan_new_art(pi_files, ANN, pi_files.files(ANN), media)
     screen.finished()
-    assert "less sharp than the originals" in screen.shown("info")
-    record = pi_files.load("zed.moore")
-    assert record.title is None  # its old title card is kept as its first slide
-    assert record.pictures == ["0001-from-tv-0001.png", "0002-from-tv-0002.png",
-                               "0003-new.png"]
-    assert record.videos == ["zed.moore.z.cat.mp4"] and record.tvs == [2]
-    assert set(tv2.files) == {"zed.moore.a.mp4", "zed.moore.z.cat.mp4"}
-    assert _duration(ffmpeg_path, tv2.files["zed.moore.a.mp4"], tmp_path) == \
-        pytest.approx(8 * 3 + 1, abs=0.1)
+    assert "not added again: art/Sun.jpg" in screen.shown("info")
+    assert [(item.label, name) for item, name in new] == [
+        ("art/moon.jpg", "ann.lee.z.moon.jpg"), ("art/star.jpg", "ann.lee.z.star-2.jpg"),
+        ("art/comet.jpg", "ann.lee.z.comet.jpg")]
+    assert replaced == ["moon.jpg"]
 
 
-def test_a_tv_shrine_that_pi_files_has_uses_its_originals(tmp_path, monkeypatch, pi_files):
-    pi_files.save_record(Record("ann.lee", None, tvs=[1]))
-    tv1 = FakeTvConnection(files={"ann.lee.a.mp4": b"slideshow"})
-    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {
-        1: TvPi(tv1, 1, settings)})
-    monkeypatch.setattr(tvs.ffmpeg, "find", lambda configured: Path("ffmpeg"))
-    screen = Screen(monkeypatch, asks=["ann", None], chooses=["tv", 1, "ann.lee"])
-    tvs.add_art(TvsSettings(shrines_dir=str(tmp_path / "shrines")))
-    screen.finished()
-    assert "already has ann.lee's art" in screen.shown("info")
-    assert not any(name.endswith("ann.lee.a.mp4") for name in tv1.downloads)  # not taken apart
+def test_pi_files_problems_are_reported_as_pi_files(tmp_path, monkeypatch, pi_files):
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png")
+    pi_files.connection.locked.add("/mnt/ssd/tv1/ann.lee")
+    new = tmp_path / "new.png"
+    _picture(new, "blue")
+    Screen(monkeypatch, asks=[str(new), ""])
+    with pytest.raises(ArtError, match="won't let the app save in /mnt/ssd/tv1/ann.lee"):
+        tvs._add_to(TvsSettings(shrines_dir=str(tmp_path)), Path("ffmpeg"), pi_files, ANN)
 
 
 def test_add_art_needs_pi_files(monkeypatch, tmp_path, no_pi_files):
@@ -760,19 +829,25 @@ def test_add_art_needs_pi_files(monkeypatch, tmp_path, no_pi_files):
     assert "needs pi-files" in screen.shown("error")
 
 
-@pytest.mark.parametrize("asks, chooses", [
-    ([None], []),  # q at "whose shrine"
-    (["ann"], [None]),  # Back at the list
-    (["ann", None], ["again"]),  # search again, then q
-    (["ann", None], ["ann.lee"]),  # q when asked for the new art
+@pytest.mark.parametrize("asks, chooses, confirms", [
+    ([None], [], []),  # q at "whose shrine"
+    (["zzz", None], [], []),  # no such shrine, then q
+    (["ann"], [None], []),  # Back at the list
+    (["ann", None], ["again"], []),  # search again, then q
+    (["ann", None], [ANN], [True]),  # q when asked for the new art
+    (["ann"], [ANN], [None]),  # Ctrl+C at "make a title card?"
+    (["ann", None], [ANN], [True]),  # q at the title card's name
 ])
-def test_adding_art_can_always_be_left(tmp_path, monkeypatch, pi_files, asks, chooses):
-    pi_files.save_record(Record("ann.lee", None))
+def test_adding_art_can_always_be_left(tmp_path, monkeypatch, pi_files, asks, chooses,
+                                       confirms):
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/old.jpg")
+    before = dict(pi_files.connection.files)
     monkeypatch.setattr(tvs.ffmpeg, "find", lambda configured: Path("ffmpeg"))
-    screen = Screen(monkeypatch, asks=asks, chooses=chooses)
+    screen = Screen(monkeypatch, asks=asks, chooses=chooses, confirms=confirms)
     tvs.add_art(TvsSettings(shrines_dir=str(tmp_path / "shrines")))
     screen.finished()
     assert not (tmp_path / "shrines").exists()
+    assert pi_files.connection.files == before
 
 
 def test_adding_never_asks_about_or_removes_the_other_videos(tmp_path, monkeypatch):

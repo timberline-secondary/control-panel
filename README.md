@@ -62,8 +62,8 @@ videos made on your computer:
 
 | Menu item | What it does |
 | --- | --- |
-| Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). Pictures are shown in the order of their names, and subfolders are included. The student's own files are never moved or changed. The videos are saved in `Documents\Hackerspace shrines\<name>`, and the original pictures are kept on pi-files (below). Making it again starts it over. |
-| Add art to a shrine | Type part of the student's username, then drag in or paste their new art. Their slideshow is made again from the original pictures kept on pi-files plus the new ones, and only the new or changed videos are copied to the TVs (the same ones it was on before). For a shrine made before pi-files, choose *Get it from a TV*: its pictures are taken out of the slideshow on the TV once, and kept on pi-files from then on. |
+| Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). Pictures are shown in the order of their names, and subfolders are included. The student's own files are never moved or changed. The videos are saved in `Documents\Hackerspace shrines\<name>`, and the original art and title card are kept on pi-files (below). If pi-files already has art for them, you can add to it or start over. |
+| Add art to a shrine | Like the old Linux control panel: type part of the student's username, then drag in or paste their new art. It's copied to their folder on pi-files, and their slideshow is made again from all the pictures there. Only the new slideshow and new videos are copied to the TVs (their TV, plus the hallway). Art that's already there is skipped, so you can drag in their whole folder again. If they have no title card yet, it offers to make one. |
 | Put a shrine on the TVs | Suggests the TV from the student's last name, plus the hallway. Shows what that student already has on each TV and asks whether to replace it. Checks there's room, copies the videos, then restarts the slideshow so it plays them. |
 | See, copy or delete the videos on a TV | List and search a TV's videos, copy some to this computer, or delete some. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |
@@ -78,22 +78,30 @@ Slideshow would then replace the videos with what's on the stick.
 
 #### pi-files (the art server)
 
-A slideshow is a video, and a picture taken back out of a video is a little blurrier each time,
-so each shrine's original pictures are kept on **pi-files**, a Raspberry Pi with an external drive.
-*Add art to a shrine* needs it; *Make a shrine* asks before going ahead without it. On its drive:
+Like hightower did for the old Linux control panel, **pi-files** (a Raspberry Pi with an external
+drive) keeps every shrine's original art, so a slideshow can be made again whenever art is added.
+(Taking pictures back out of a slideshow video would make them blurrier each time.) *Add art to
+a shrine* needs it; *Make a shrine* asks before going ahead without it. On its drive there's a
+folder for each TV, and in it a folder for each student or collection:
 
 ```
-/mnt/ssd/shrines/<name>/shrine.json   what's in the shrine (title card, pictures in order, TVs)
-/mnt/ssd/shrines/<name>/pictures/     the original pictures
-/mnt/ssd/shrines/<name>/videos/       the videos made for the TVs
-/mnt/ssd/shrines/.replaced/           shrines that were made again from scratch (never deleted)
+/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png   their title card (always the first slide)
+/mnt/ssd/tv1/ann.lee/ann.lee.z.sunset.jpg  each picture and video (pictures are shown in the
+/mnt/ssd/tv1/ann.lee/...                   order of their names)
+/mnt/ssd/tv3/skills-canada-2026/...        a collection
+/mnt/ssd/.replaced/                        art that was replaced (moved here, never deleted)
 ```
+
+Art copied there by hand can have any names, and videos left loose in a TV's folder
+(`tv1/ann.lee.z.clip.mp4`, as on hightower) are fine. A student's TV is the folder their art is
+in; if a new shrine is put on a different TV, its art moves to that TV's folder.
 
 To set one up: Raspberry Pi OS Lite, with the hostname `pi-files`, the user `pi` with the same
 password as the TVs, and SSH turned on (all in Raspberry Pi Imager's settings). Format the drive as
 ext4 and mount it at `/mnt/ssd` from `/etc/fstab` (with `nofail`, so the Pi still starts without
-it). The app makes `/mnt/ssd/shrines` the first time it's used, and won't keep art anywhere that
-isn't on the external drive. It's worth backing up the drive now and then.
+it). Files copied there with `sudo` belong to root, so then run `sudo chown -R pi: /mnt/ssd` (the
+app says so if it can't save there). The app won't keep art anywhere that isn't on the external
+drive. It's worth backing up the drive now and then.
 
 ### Grade 9 mode
 
@@ -131,7 +139,7 @@ media_dir = "/home/pi/rs_media"     # the folder Raspberry Slideshow plays
 shrines_dir = ""                    # where shrines are saved; empty means Documents\Hackerspace shrines
 ffmpeg = ""                         # an ffmpeg.exe to use; empty means download it when needed
 art_host = "pi-files.hackerspace.tbl"  # the Pi that keeps the shrines' art (same login as the TVs)
-art_dir = "/mnt/ssd/shrines"        # where, on its external drive
+art_dir = "/mnt/ssd"                # its external drive, with a folder for each TV (tv1 to tv4)
 ```
 
 The Pis usually share a password, so once you've typed it for one Pi, the app tries it on the
