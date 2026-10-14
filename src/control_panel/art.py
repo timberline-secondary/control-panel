@@ -20,9 +20,11 @@ from __future__ import annotations
 import datetime
 import hashlib
 import io
+import json
 import posixpath
 import re
 import shlex
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,7 @@ from control_panel.ssh import PiConnection
 TVS = (1, 2, 3, 4)
 REPLACED = ".replaced"
 CHECK_FILE = ".control-panel-check"
+TV_NAMES = ".tv-names.json"  # in a shrine's folder: {piece's file name: its video on the TVs}
 SPARE_SPACE = 1_000_000_000  # bytes to leave free on the drive
 PICTURE_TYPES = {".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 MAX_PIECE_NAME = 80  # characters, so names stay well under the drive's 255-byte limit
@@ -396,14 +399,41 @@ class ArtServer:
                 progress(i / len(paths))
         return got
 
-    def fetch(self, path: str, folder: Path) -> Path:
+    def fetch(self, path: str, folder: Path,
+              progress: Callable[[int, int], None] | None = None) -> Path:
         """Copy one file here to look at, under a name that's safe on Windows."""
         folder.mkdir(parents=True, exist_ok=True)
         stem, ext = posixpath.splitext(posixpath.basename(path))
         safe = re.sub(r"[^A-Za-z0-9 ._-]", "_", stem)[:80].strip(" .") or "art"
         local = folder / f"{len(list(folder.iterdir())) + 1:02d}-{safe}{_extension(ext)}"
-        self.connection.download(path, local)
+        self.connection.download(path, local, progress)
         return local
+
+    def tv_names(self, art: ArtFolder) -> dict[str, str]:
+        """Which video on the TVs each of a shrine's videos and animations was made into,
+        as kept by write_tv_names(): {its file name in the shrine's folder: the video's}.
+        Empty for a shrine whose videos the app didn't make (e.g. hightower's)."""
+        path = posixpath.join(art.path, TV_NAMES)
+        if not self.connection.exists(path):
+            return {}
+        with tempfile.TemporaryDirectory(prefix="tv-names-") as folder:
+            local = Path(folder) / "names.json"
+            self.connection.download(path, local)
+            try:
+                names = json.loads(local.read_text(encoding="utf-8"))
+            except ValueError:  # damaged: work the names out instead, as for hightower's
+                return {}
+        if not isinstance(names, dict):
+            return {}
+        return {k: v for k, v in names.items() if isinstance(k, str) and isinstance(v, str)}
+
+    def write_tv_names(self, art: ArtFolder, names: dict[str, str]) -> None:
+        text = json.dumps(dict(sorted(names.items())), indent=1, ensure_ascii=False)
+        try:
+            self.connection.upload(io.BytesIO(text.encode("utf-8")),
+                                   posixpath.join(art.path, TV_NAMES))
+        except PermissionError:
+            raise self.not_allowed(art.path) from None
 
     def set_aside(self, path: str, label: str) -> str:
         """Move a folder or file into .replaced, rather than deleting anyone's art."""

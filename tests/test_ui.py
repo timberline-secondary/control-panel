@@ -73,6 +73,7 @@ MENU = [ui.choice("One", 1), ui.choice("Two", 2), ui.choice("Back to the TV menu
     ("b" + ENTER, None),
     ("9" + ENTER + "1" + ENTER, 1),  # not a choice, so asked again
     ("two" + ENTER + "2" + ENTER, 2),
+    ("\u00b2" + ENTER + "2" + ENTER, 2),  # a superscript 2 isn't a number to type
 ])
 def test_choose(keys, expected):
     with typed(keys):

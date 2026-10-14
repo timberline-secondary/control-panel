@@ -481,3 +481,15 @@ def test_new_videos_dont_take_the_names_of_old_ones(tmp_path, ffmpeg_path):
                           [shrine.Media(tmp_path / "cat.gif", ANIMATION, "cat.gif")],
                           tmp_path / "work", no_progress, taken={"ann.lee.z.cat.mp4"})
     assert [p.name for p in made] == ["ann.lee.z.cat-2.mp4"]
+
+
+def test_a_camera_jpeg_with_a_preview_in_it_isnt_an_animation(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    Image.new("RGB", (40, 30), "red").save(photo, "MPO", save_all=True,
+                                           append_images=[Image.new("RGB", (20, 15), "blue")])
+    with Image.open(photo) as image:
+        assert image.format == "MPO" and image.is_animated
+    assert not shrine.is_animated(photo)  # as classify() says: it's a picture
+    frames = [Image.new("RGB", (16, 16), c) for c in ("red", "green")]
+    frames[0].save(tmp_path / "spin.gif", save_all=True, append_images=frames[1:])
+    assert shrine.is_animated(tmp_path / "spin.gif")

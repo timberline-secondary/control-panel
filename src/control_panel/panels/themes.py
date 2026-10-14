@@ -332,8 +332,8 @@ def add_theme(pi: ThemesPi) -> None:
             if not pi.has_theme(code):
                 break
             choice = ui.choose(f"There's already a theme with code {code}.", [
+                ui.choice("Use a different code", "different"),  # first, so Enter is safe
                 ui.choice("Replace it", "replace"),
-                ui.choice("Use a different code", "different"),
                 ui.choice("Cancel (don't add this theme)", ui.BACK),
             ])
             if choice is None:

@@ -166,7 +166,7 @@ def choose(prompt: str, choices: list[Choice | str]) -> Any:
         answer = answer.strip()
         if not answer and numbered:
             return numbered[1].value
-        if answer.isdigit() and int(answer) in numbered:
+        if answer.isascii() and answer.isdigit() and int(answer) in numbered:
             return numbered[int(answer)].value
         error(f"That isn't one of the choices. Type its number (1 to {len(numbered)}), then "
               "press Enter." if numbered else "There's nothing to choose. Type q to go back.")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import json
 import os
 import posixpath
 import re
@@ -28,6 +29,7 @@ import paramiko
 from control_panel import ffmpeg, login, shrine, ui
 from control_panel.art import (
     REPLACED,
+    TV_NAMES,
     ArtError,
     ArtFolder,
     ArtServer,
@@ -365,10 +367,11 @@ def _put_back(server: ArtServer, moved: list[tuple[str, str]]) -> bool:
 
 
 def _keep_new_art(server: ArtServer, name: str, tv: int, title: shrine.Title | None,
-                  art: list[tuple[shrine.Media, str]], old: list[ArtFolder],
-                  work: Path) -> ArtFolder | None:
+                  art: list[tuple[shrine.Media, str]], old: list[ArtFolder], work: Path,
+                  tv_names: dict[str, str] | None = None) -> ArtFolder | None:
     """Copy a new shrine's art to pi-files, then move its old art (if it had some) aside.
-    Returns its folder there, or None (having said why) if it couldn't."""
+    tv_names: {each video's name on pi-files: its name on the TVs}. Returns its folder
+    there, or None (having said why) if it couldn't."""
     moved: list[tuple[str, str]] = []  # (where it went, where it was), to undo on failure
     try:
         with on_pi_files(server):
@@ -380,6 +383,11 @@ def _keep_new_art(server: ArtServer, name: str, tv: int, title: shrine.Title | N
                 card = work / f"{name}.a.title.png"
                 shrine.title_card(title).save(card)
                 files.insert(0, (card, card.name))
+            if tv_names:
+                names = work / "tv-names.json"
+                names.write_text(json.dumps(tv_names, indent=1, ensure_ascii=False),
+                                 encoding="utf-8")
+                files.append((names, TV_NAMES))
             with ui.progress(f"Keeping {name}'s art on pi-files") as update:
                 for i, (local, file_name) in enumerate(files, start=1):
                     server.upload(staging, local, file_name)
@@ -425,12 +433,14 @@ def _follow_to(server: ArtServer, kept: ArtFolder, pushed: PushResult) -> None:
 
 
 def _video_names(name: str, old: list[str], folder: Path,
-                 replaced: set[str] | frozenset[str] = frozenset()) -> set[str]:
+                 replaced: set[str] | frozenset[str] = frozenset(),
+                 known: dict[str, str] | None = None) -> set[str]:
     """The names the shrine's videos have on the TVs already, so new ones don't take them:
-    worked out from its art on pi-files the way Make a shrine names them, plus any in its
+    those noted on pi-files (known), those worked out from its art there, plus any in its
     folder on this computer (except those of art being replaced, which its replacement
     takes over, so the TVs don't play both)."""
-    taken: set[str] = set()
+    replacing = {posixpath.basename(p) for p in replaced}
+    taken = {video for kept, video in (known or {}).items() if kept not in replacing}
     for path in order([p for p in old if not is_title_card(p)], name):
         shrine.video_file_name(name, piece(path, name), taken)
     if folder.is_dir():
@@ -549,8 +559,10 @@ def make_shrine(settings: TvsSettings) -> None:
                     default=False)):
                 return
             art = _in_slideshow_order(name, media)
-            made, problems = shrine.make(ffmpeg_path, name, title, [item for item, _ in art],
-                                         Path(work) / "made", ui.progress)
+            items = [item for item, _ in art]
+            made, problems = shrine.make(ffmpeg_path, name, title, items, Path(work) / "made",
+                                         ui.progress)
+            videos = {item.path: video for item, video in shrine.video_names(name, items)}
             for problem in problems:
                 ui.warning(f"Left out {problem.label}: {problem.reason}")
             if not made:
@@ -564,9 +576,10 @@ def make_shrine(settings: TvsSettings) -> None:
                 ui.info(f"  {video.name} ({size_text(video.stat().st_size)})")
             if server is not None:
                 failed = {problem.label for problem in problems}
-                kept = _keep_new_art(server, name, home, title,
-                                     [(item, f) for item, f in art if item.label not in failed],
-                                     old_art, Path(work))
+                art = [(item, f) for item, f in art if item.label not in failed]
+                kept = _keep_new_art(server, name, home, title, art, old_art, Path(work),
+                                     {f: videos[item.path] for item, f in art
+                                      if item.path in videos})
         while True:
             next_step = ui.choose("What next?", [
                 ui.choice("Put it on the TVs", "push"),
@@ -642,6 +655,7 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
     name = target.name
     with on_pi_files(server):
         existing = server.art_files(target)
+        known = server.tv_names(target)
     left_out = target.path in server.unreadable
     _say_unreadable(server)
     if left_out and not ui.confirm("Its slideshow will be made without those. Carry on?",
@@ -698,10 +712,11 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
         # Videos are named after what they're kept as.
         videos = [shrine.Media(item.path, item.kind, piece(f, name))
                   for item, f, _ in planned if item.kind != shrine.PICTURE]
-        made, problems = shrine.make(ffmpeg_path, name, None,
-                                     [item for item, _ in slides] + videos, work / "made",
-                                     ui.progress,
-                                     taken=_video_names(name, old_files, folder, replaced))
+        items = [item for item, _ in slides] + videos
+        taken = _video_names(name, old_files, folder, replaced, known)
+        made, problems = shrine.make(ffmpeg_path, name, None, items, work / "made",
+                                     ui.progress, taken=taken)
+        video_names = {item.path: video for item, video in shrine.video_names(name, items, taken)}
         for problem in problems:
             ui.warning(f"Left out {problem.label}: {problem.reason}")
         if not made:
@@ -755,6 +770,15 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
             return
         if files:
             ui.success(f"pi-files now has the new art, in {target.path}.")
+        names = {k: v for k, v in known.items()
+                 if posixpath.join(target.path, k) not in replaced}
+        names |= {f: video_names[item.path] for item, f, _ in keep if item.path in video_names}
+        if names != known:
+            try:
+                with on_pi_files(server):
+                    server.write_tv_names(target, names)
+            except ArtError as e:
+                ui.warning(f"Couldn't note on pi-files which videos its new art became: {e}")
     ui.success(f"Made {name}'s new videos, in {folder}:")
     for video in saved:
         ui.info(f"  {video.name} ({size_text(video.stat().st_size)})")
@@ -841,6 +865,10 @@ def _plan_new_art(server: ArtServer, target: ArtFolder, existing: dict[str, int]
     return planned
 
 
+VIEWING = "control-panel-viewing"  # where art is copied to be looked at, in the temp folder
+MOVING_PICTURES = {".gif", ".png", ".webp"}  # the kinds of picture that can be animations
+
+
 def view_art(settings: TvsSettings) -> None:
     """Look at a shrine's art on pi-files one piece at a time, and delete pieces, as the old
     control panel's "view or remove media" did."""
@@ -857,54 +885,124 @@ def view_art(settings: TvsSettings) -> None:
 
 def _view(settings: TvsSettings, server: ArtServer, target: ArtFolder) -> None:
     name = target.name
-    deleted: list[str] = []  # the names on the TVs of what's gone, since the slideshow was made
+    deleted: dict[str, set[str]] = {}  # deleted videos still on the TVs: {piece: TV names}
     changed = False  # a picture (or the title card) went, so the slideshow needs making again
-    viewing = Path(tempfile.mkdtemp(prefix="shrine-art-"))
+    viewing = Path(tempfile.gettempdir()) / VIEWING
+    shutil.rmtree(viewing, ignore_errors=True)  # what was looked at last time
+    fetched: dict[str, Path] = {}
     try:
-        while True:
-            with on_pi_files(server):
-                existing = server.art_files(target)
-            _say_unreadable(server)
-            if not existing:
-                ui.info(f"{target.path} on pi-files has no art left.")
-                break
-            path = ui.choose(f"{target.folder}'s art on pi-files (TV {target.tv}). Which piece "
-                             "do you want to see?", [
-                                 *(ui.choice(_describe(p, size, target), p)
-                                   for p, size in _viewing_order(existing, name)),
-                                 ui.choice("Back", ui.BACK)])
-            if path is None:
-                break
-            file_name = posixpath.basename(path)
-            with on_pi_files(server):
-                local = server.fetch(path, viewing)
-            open_file(local)
-            if not ui.confirm(f"Delete {file_name}? Hopefully it opened for you. (It's moved to "
-                              f"{server.root}/{REPLACED}, so it can be put back.)",
-                              default=False):
-                continue
-            moving = is_picture(path) and not shrine.is_animated(local)
-            tv_names = set() if moving else _tv_names(name, path, list(existing))
-            label = file_name if file_name.lower().startswith(f"{name}.") \
-                else f"{target.folder}-{file_name}"
-            with on_pi_files(server):
-                server.set_aside(path, label)
-            ui.success(f"Deleted {file_name} from {target.folder}'s art.")
-            deleted += sorted(tv_names)
-            changed = changed or moving
-            if ui.confirm(f"Make {name}'s slideshow again without it, and put it on the TVs?",
-                          default=True):
-                if _after_deleting(settings, server, target, changed, set(deleted)):
-                    deleted, changed = [], False
+        try:
+            while True:
+                with on_pi_files(server):
+                    existing = server.art_files(target)
+                _say_unreadable(server)
+                if not existing:
+                    ui.info(f"{target.path} on pi-files has no art left.")
+                    break
+                path = ui.choose(f"{target.folder}'s art on pi-files (TV {target.tv}). Which "
+                                 "piece do you want to see?", [
+                                     *(ui.choice(_describe(p, size, target), p)
+                                       for p, size in _viewing_order(existing, name)),
+                                     ui.choice("Back", ui.BACK)])
+                if path is None:
+                    break
+                file_name = posixpath.basename(path)
+                if path not in fetched or not fetched[path].exists():
+                    with on_pi_files(server), ui.progress(f"Getting {file_name}") as update:
+                        fetched[path] = server.fetch(
+                            path, viewing, lambda done, size: update(done / size if size else 1))
+                open_file(fetched[path])
+                if not ui.confirm(f"Delete {file_name}? Hopefully it opened for you. (It's moved "
+                                  f"to {server.root}/{REPLACED}, so it can be put back.)",
+                                  default=False):
+                    continue
+                gone = _delete(server, target, path, existing, fetched[path])
+                if gone is None:
+                    changed = True
+                elif gone:
+                    deleted[file_name] = gone
+                if (deleted or changed) and \
+                        ui.confirm(_offer(name, changed, list(deleted), file_name),
+                                   default=True) and \
+                        _try_after_deleting(settings, server, target, changed,
+                                            set().union(*deleted.values())):
+                    deleted, changed = {}, False
+        except (ArtError, KeyboardInterrupt) as e:
+            if not (deleted or changed):
+                raise
+            ui.error(str(e) if isinstance(e, ArtError) else "Cancelled.")
         if deleted or changed:
-            if ui.confirm(f"Some of {name}'s art was deleted. Make the slideshow again, and put it "
-                          "on the TVs?", default=True) and \
-                    _after_deleting(settings, server, target, changed, set(deleted)):
+            if ui.confirm(f"Before you go: {_offer(name, changed, list(deleted))}",
+                          default=True) and \
+                    _try_after_deleting(settings, server, target, changed,
+                                        set().union(*deleted.values())):
                 return
-            ui.warning(f"Don't forget: the TVs still show the deleted art. To fix it, use 'Add "
-                       f"art to a shrine' for {name} and press Enter without adding any.")
+            _remind(name, changed, list(deleted))
     finally:
         shutil.rmtree(viewing, ignore_errors=True)  # whatever a viewer isn't holding open
+
+
+def _delete(server: ArtServer, target: ArtFolder, path: str, existing: dict[str, int],
+            local: Path) -> set[str] | None:
+    """Move a piece aside on pi-files. Returns the names of its video on the TVs, or None
+    for a picture in the slideshow (which then needs making again)."""
+    name = target.name
+    file_name = posixpath.basename(path)
+    in_slideshow = is_picture(path) and not shrine.is_animated(local)
+    known: dict[str, str] = {}
+    if not in_slideshow:
+        with on_pi_files(server):
+            known = server.tv_names(target)
+        sure, maybe = _tv_names(name, target, path, list(existing), known)
+        for video, other in sorted(maybe.items()):
+            if ui.confirm(f"{video} on the TVs is the video of {file_name} or of {other}, and "
+                          "it can't tell which. Take it off the TVs too?", default=False):
+                sure.add(video)
+    label = file_name if file_name.lower().startswith(f"{name}.") \
+        else f"{target.folder}-{file_name}"
+    with on_pi_files(server):
+        server.set_aside(path, label)
+    ui.success(f"Deleted {file_name} from {target.folder}'s art.")
+    if in_slideshow:
+        return None
+    if posixpath.dirname(path) == target.path and file_name in known:
+        try:
+            with on_pi_files(server):
+                server.write_tv_names(target, {k: v for k, v in known.items()
+                                               if k != file_name})
+        except ArtError as e:
+            ui.warning(f"Couldn't note on pi-files that its video is gone: {e}")
+    if not sure:
+        ui.warning(f"Not sure which video on the TVs is {file_name}'s, so it's left on them. "
+                   "Delete it there with 'See, copy or delete the videos on a TV'.")
+    return sure
+
+
+def _offer(name: str, changed: bool, deleted: list[str], file_name: str = "") -> str:
+    """The question after art is deleted: make the slideshow again, take the videos of the
+    deleted pieces off, or both."""
+    without = f"without {file_name}" if file_name else "without the deleted art"
+    videos = _videos_of(deleted)
+    if changed and deleted:
+        return f"Make {name}'s slideshow again {without}, take {videos} off the TVs, and " \
+            "put the new slideshow on them?"
+    if changed:
+        return f"Make {name}'s slideshow again {without}, and put it on the TVs?"
+    return f"Take {videos} off the TVs?"
+
+
+def _videos_of(pieces: list[str]) -> str:
+    return f"the video{'s' if len(pieces) > 1 else ''} of {', '.join(pieces)}"
+
+
+def _remind(name: str, changed: bool, deleted: list[str]) -> None:
+    ui.warning("Don't forget: the TVs still show the deleted art.")
+    if deleted:
+        ui.warning(f"  To take {_videos_of(deleted)} off them, use 'See, copy or delete the "
+                   "videos on a TV'.")
+    if changed:
+        ui.warning(f"  To make the slideshow again without it, use 'Add art to a shrine' for "
+                   f"{name}, press Enter without adding any, then type y.")
 
 
 def _viewing_order(existing: dict[str, int], name: str) -> list[tuple[str, int]]:
@@ -927,21 +1025,56 @@ def _describe(path: str, size: int, target: ArtFolder) -> str:
     return f"{file_name} ({kind}, {size_text(size)})"
 
 
-def _tv_names(name: str, path: str, paths: list[str]) -> set[str]:
-    """The names a piece's video may have on the TVs: as this app names it (worked out the
-    way _video_names does), as hightower had it, and as the old Windows control panel did."""
+def _tv_names(name: str, target: ArtFolder, path: str, paths: list[str],
+              known: dict[str, str]) -> tuple[set[str], dict[str, str]]:
+    """The names a piece's video has on the TVs: (sure, {maybe: the other piece it may be
+    of}). Sure if this app made it (see ArtServer.tv_names). Otherwise it's worked out:
+    as Add art named them before, as hightower had them, and as the old Windows control
+    panel named them. A name another piece could have too is only a maybe."""
+    base = posixpath.basename(path)
+    if posixpath.dirname(path) == target.path and base in known:
+        return {known[base]}, {}
+    guesses = _guessed_tv_names(name, paths)
+    owners = {video: other for other, videos in guesses.items() if other != path
+              for video in videos}
+    owners |= {video: piece for piece, video in known.items()}
+    mine = guesses.get(path, set())
+    return mine - set(owners), {video: posixpath.basename(owners[video])
+                                for video in mine & set(owners)}
+
+
+def _guessed_tv_names(name: str, paths: list[str]) -> dict[str, set[str]]:
     taken: set[str] = set()
     named = {p: shrine.video_file_name(name, piece(p, name), taken)
              for p in order([p for p in paths if not is_title_card(p)], name)}
-    base = posixpath.basename(path)
-    return {n for n in (named.get(path), base, f"{base}.mp4")
-            if n and n.lower().startswith(f"{name}.z.") and n.lower().endswith(".mp4")}
+    guesses = {}
+    for path in paths:
+        if is_title_card(path) or (is_picture(path) and
+                                   posixpath.splitext(path)[1].lower() not in MOVING_PICTURES):
+            continue
+        base = posixpath.basename(path)
+        guesses[path] = {n for n in (named.get(path), base, f"{base}.mp4")
+                         if n and n.lower().startswith(f"{name}.z.")
+                         and n.lower().endswith(".mp4")}
+    return guesses
+
+
+def _try_after_deleting(settings: TvsSettings, server: ArtServer, target: ArtFolder,
+                        remake: bool, gone: set[str]) -> bool:
+    try:
+        return _after_deleting(settings, server, target, remake, gone)
+    except ArtError as e:
+        ui.error(str(e))
+    except KeyboardInterrupt:
+        ui.warning("Cancelled.")
+    return False
 
 
 def _after_deleting(settings: TvsSettings, server: ArtServer, target: ArtFolder,
                     remake: bool, gone: set[str]) -> bool:
     """Make the slideshow again from the art that's left (if a picture went), take the
-    deleted videos off the TVs, and put the new slideshow on them. Returns whether it did."""
+    deleted videos off the TVs, and put the new slideshow on them. Returns whether every
+    TV chosen was changed."""
     name = target.name
     folder = shrines_folder(settings) / name
     slideshow = None
@@ -954,6 +1087,11 @@ def _after_deleting(settings: TvsSettings, server: ArtServer, target: ArtFolder,
             return False
         with on_pi_files(server):
             existing = server.art_files(target)
+        left_out = target.path in server.unreadable
+        _say_unreadable(server)
+        if left_out and not ui.confirm("Its slideshow will be made without those. Carry on?",
+                                       default=False):
+            return False
         with tempfile.TemporaryDirectory(prefix="shrine-") as work:
             work = Path(work)
             pictures = order([p for p in existing if is_picture(p)], name)
@@ -981,23 +1119,29 @@ def _after_deleting(settings: TvsSettings, server: ArtServer, target: ArtFolder,
         for number, label in TVS.items()], require_one=True)
     if not numbers:
         return False
+    done = set()
     with connected(settings, numbers) as tvs:
-        for tv in tvs.values():
+        for number, tv in tvs.items():
             try:
                 taken_off = [f for f in tv.videos() if f in gone]
                 for file_name in taken_off:
                     tv.remove(file_name)
                 if taken_off:
                     ui.success(f"{tv.name}: took off {', '.join(taken_off)}.")
-                if slideshow is not None:
-                    _push_to(tv, {slideshow: slideshow.name}, name, adding=True)  # restarts it
+                if slideshow is not None:  # (which restarts it)
+                    if not _push_to(tv, {slideshow: slideshow.name}, name, adding=True):
+                        continue
                 elif taken_off:
                     refresh(tv)
                 else:
                     ui.info(f"{tv.name}: nothing to change.")
+                done.add(number)
             except (TvError, OSError, paramiko.SSHException) as e:
                 ui.error(f"{tv.name}: that didn't work ({e}).")
-    return True
+    left = [f"TV {n}" for n in numbers if n not in done]
+    if left:
+        ui.warning(f"Not changed on {', '.join(left)}.")
+    return not left
 
 
 def _old_slides(ffmpeg_path: Path, server: ArtServer, pictures: list[str],
@@ -1409,7 +1553,7 @@ def _pick(videos: dict[str, int], verb: str) -> list[str]:
     if not names:
         ui.warning(f"No videos have '{text}' in their name.")
         return []
-    return ui.choose_many(f"Tick the ones to {verb}", [
+    return ui.choose_many(f"Which ones do you want to {verb}?", [
         ui.choice(f"{n} ({size_text(videos[n])})", n) for n in names
     ]) or []
 
