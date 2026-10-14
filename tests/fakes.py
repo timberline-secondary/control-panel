@@ -41,15 +41,21 @@ class FakeFilesConnection:
             return CommandResult(0, "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
                                     f"/dev/sda1 1000000 10 {self.free_kb} 1% {mount}\n")
         if command.startswith("find "):
-            folder = shlex.split(command)[1]
+            folder = next(arg for arg in shlex.split(command)[1:] if not arg.startswith("-"))
             inside = {p for p in self.dirs | set(self.files)
                       if posixpath.dirname(p) == folder and p != folder}
             return CommandResult(0, "".join(
                 f"{'d' if p in self.dirs else 'f'}\t{len(self.files.get(p, b''))}\t"
                 f"{posixpath.basename(p)}\n" for p in sorted(inside)))
         if command.startswith("sha256sum -- "):
-            lines = [f"{hashlib.sha256(self.files[path]).hexdigest()}  {path}"
-                     for path in shlex.split(command)[2:] if path in self.files]
+            lines = []
+            for path in shlex.split(command)[2:]:
+                if path in self.files:  # coreutils escapes names with \, new lines or \r
+                    digest = hashlib.sha256(self.files[path]).hexdigest()
+                    escaped = path.replace("\\", "\\\\").replace("\n", "\\n") \
+                        .replace("\r", "\\r")
+                    lines.append(f"\\{digest}  {escaped}" if escaped != path
+                                 else f"{digest}  {path}")
             return CommandResult(0, "\n".join(lines) + "\n")
         return CommandResult(0, "")
 

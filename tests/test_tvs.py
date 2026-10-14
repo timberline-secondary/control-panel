@@ -760,15 +760,16 @@ def test_art_follows_a_shrine_to_another_tv(tmp_path, monkeypatch, ffmpeg_path, 
     assert not pi_files.connection.exists("/mnt/ssd/tv1/ann.lee")
 
 
-@pytest.mark.parametrize("numbers, where", [
-    ([1, 2], "tv1"),  # more than one in-room TV: it stays put
-    ([4], "tv4"),  # only the hallway
-    ([2, 4], "tv2"),
+@pytest.mark.parametrize("chosen, done, where", [
+    ([1, 2], [1, 2], "tv1"),  # more than one in-room TV: it stays put
+    ([4], [4], "tv4"),  # only the hallway
+    ([2, 4], [2, 4], "tv2"),
+    ([2, 4], [4], "tv1"),  # TV 2 was off, or skipped
 ])
-def test_which_tv_art_follows_to(monkeypatch, pi_files, numbers, where):
+def test_which_tv_art_follows_to(monkeypatch, pi_files, chosen, done, where):
     pi_files.connection.add("/mnt/ssd/tv1/ann.lee/a.jpg")
     Screen(monkeypatch)
-    tvs._follow_to(pi_files, ANN, numbers)
+    tvs._follow_to(pi_files, ANN, tvs.PushResult(chosen, done))
     assert pi_files.connection.exists(f"/mnt/ssd/{where}/ann.lee/a.jpg")
 
 
@@ -776,10 +777,10 @@ def test_art_stays_put_if_the_other_tv_has_a_folder_with_that_name(monkeypatch, 
     pi_files.connection.add("/mnt/ssd/tv1/ann.lee/a.jpg")
     pi_files.connection.add("/mnt/ssd/tv2/ann.lee/b.jpg")
     screen = Screen(monkeypatch)
-    tvs._follow_to(pi_files, ANN, [2])
+    tvs._follow_to(pi_files, ANN, tvs.PushResult([2], [2]))
     assert "stays in TV 1's" in screen.shown("warning")
     pi_files.connection.locked.add("/mnt/ssd/tv1")
-    tvs._follow_to(pi_files, ANN, [3])
+    tvs._follow_to(pi_files, ANN, tvs.PushResult([3], [3]))
     assert "Couldn't move its art" in screen.shown("warning")
     assert pi_files.connection.exists("/mnt/ssd/tv1/ann.lee/a.jpg")
 
@@ -1075,16 +1076,175 @@ def test_art_already_on_pi_files_isnt_added_again(tmp_path, monkeypatch, pi_file
     assert "not added again: Sun.jpg, dance.mp4" in screen.shown("info")
     assert "already has pieces with the same names as moon.jpg, star.jpg" in screen.shown("info")
     assert planned == [
-        ("moon.jpg", "ann.lee.z.moon.jpg", "/mnt/ssd/tv1/ann.lee/moon.jpg"),
-        ("star.jpg", "ann.lee.z.star.jpg", "/mnt/ssd/tv1/ann.lee/ann.lee.z.star.png"),
-        ("comet.jpg", "ann.lee.z.comet.jpg", None),
-        ("title.png", "ann.lee.z.title.png", None)]  # not the title card
-    assert plan("skip")[1] == [("comet.jpg", "ann.lee.z.comet.jpg", None),
-                               ("title.png", "ann.lee.z.title.png", None)]
+        ("moon.jpg", "ann.lee.z.moon.jpg", ["/mnt/ssd/tv1/ann.lee/moon.jpg"]),
+        ("star.jpg", "ann.lee.z.star.jpg", ["/mnt/ssd/tv1/ann.lee/ann.lee.z.star.png"]),
+        ("comet.jpg", "ann.lee.z.comet.jpg", []),
+        ("title.png", "ann.lee.z.title.png", [])]  # not the title card
+    assert plan("skip")[1] == [("comet.jpg", "ann.lee.z.comet.jpg", []),
+                               ("title.png", "ann.lee.z.title.png", [])]
     assert [name for _, name, _ in plan("both")[1]] == [
         "ann.lee.z.moon.jpg", "ann.lee.z.star.jpg", "ann.lee.z.comet.jpg", "ann.lee.z.title.png"]
     Screen(monkeypatch, chooses=[None])
     assert tvs._plan_new_art(pi_files, ANN, existing, media) is None
+
+
+def test_replace_takes_every_old_copy_and_only_the_replacer_takes_its_name(tmp_path, monkeypatch,
+                                                                           pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.jpg", b"moon")
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.png", b"moon, saved again by hightower")
+    media = [shrine.Media(_new_file(tmp_path, f, d), shrine.PICTURE, label)
+             for f, d, label in [("1.png", b"new moon", "moon.png"),
+                                 ("2.png", b"another moon", "Moon.png")]]
+    Screen(monkeypatch, chooses=["replace"])
+    planned = tvs._plan_new_art(pi_files, ANN, pi_files.art_files(ANN), media)
+    assert [(item.label, name, sorted(olds)) for item, name, olds in planned] == [
+        ("moon.png", "ann.lee.z.moon.png", ["/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.jpg",
+                                            "/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.png"]),
+        ("Moon.png", "ann.lee.z.moon-2.png", [])]
+
+
+def test_a_damaged_picture_cant_replace_anything(tmp_path, monkeypatch, ffmpeg_path, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png",
+              _picture(tmp_path / "title.png", "white", (1920, 1080)))
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.png", _picture(tmp_path / "old.png", "red"))
+    new = tmp_path / "new"
+    new.mkdir()
+    noise = Image.effect_noise((600, 400), 80).convert("RGB")
+    noise.save(new / "Moon.jpg", quality=95)
+    data = (new / "Moon.jpg").read_bytes()
+    (new / "Moon.jpg").write_bytes(data[:len(data) // 2])  # cut short, as if partly copied
+    tv1 = FakeTvConnection()
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {1: TvPi(tv1, 1, settings)})
+    screen = Screen(monkeypatch, asks=["ann", str(new), ""], chooses=[ANN], confirms=[False])
+    tvs.add_art(TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path)))
+    screen.finished()
+    assert "Left out Moon.jpg" in screen.shown("warning")
+    assert files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.png"] == \
+        (tmp_path / "old.png").read_bytes()
+    assert not files.exists("/mnt/ssd/.replaced")
+
+
+def test_a_failed_copy_to_pi_files_can_be_tried_again(tmp_path, monkeypatch, ffmpeg_path,
+                                                      pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png",
+              _picture(tmp_path / "title.png", "white", (1920, 1080)))
+    tv1 = FakeTvConnection()
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {1: TvPi(tv1, 1, settings)})
+    art = _new_art(tmp_path)
+    uploads = 0
+
+    def flaky(fileobj, path, progress=None):
+        nonlocal uploads
+        uploads += 1
+        if uploads == 2:
+            raise OSError("Socket is closed")
+        FakeFilesConnection.upload(files, fileobj, path)
+    monkeypatch.setattr(files, "upload", flaky)
+    settings = TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path))
+    screen = Screen(monkeypatch, asks=["ann", str(art), ""], chooses=[ANN])
+    tvs.add_art(settings)
+    screen.finished()
+    assert "So nothing has changed" in screen.shown("error")
+    assert kept_files(pi_files) == ["ann.lee.a.title.png"]  # nothing half there
+    assert tv1.files == {}
+    screen = Screen(monkeypatch, asks=["ann", str(art), ""], chooses=[ANN], ticks=[[1]])
+    tvs.add_art(settings)
+    screen.finished()
+    assert kept_files(pi_files) == ["ann.lee.a.title.png", "ann.lee.z.clip.gif",
+                                    "ann.lee.z.new.png"]
+    assert set(tv1.files) == {"ann.lee.a.mp4", "ann.lee.z.clip.mp4"}
+
+
+def test_a_replaced_video_keeps_its_name_on_the_tvs(tmp_path, monkeypatch, ffmpeg_path,
+                                                    pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png")
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.clip.gif", b"the old animation")
+    local = tmp_path / "shrines" / "ann.lee"
+    local.mkdir(parents=True)
+    (local / "ann.lee.z.clip.mp4").write_bytes(b"old video")
+    tv1 = FakeTvConnection(files={"ann.lee.z.clip.mp4": b"old video"})
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {1: TvPi(tv1, 1, settings)})
+    art = _new_art(tmp_path)
+    (art / "new.png").unlink()
+    screen = Screen(monkeypatch, asks=["ann", str(art), ""], chooses=[ANN, "replace"],
+                    ticks=[[1]])
+    tvs.add_art(TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path)))
+    screen.finished()
+    assert set(tv1.files) == {"ann.lee.z.clip.mp4"}  # not a second, clip-2
+    assert tv1.files["ann.lee.z.clip.mp4"] != b"old video"
+
+
+def test_videos_from_subfolders_are_named_as_theyre_kept(tmp_path, monkeypatch, ffmpeg_path,
+                                                         pi_files):
+    art = tmp_path / "art"
+    (art / "Grade 9").mkdir(parents=True)
+    frames = [Image.new("RGB", (16, 16), c) for c in ("red", "green")]
+    frames[0].save(art / "Grade 9" / "dance.gif", save_all=True, append_images=frames[1:],
+                   duration=500)
+    screen = Screen(monkeypatch, chooses=["student", "Digital Art", None],
+                    asks=["ann.lee", "", "", str(art), ""])
+    tvs.make_shrine(TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path)))
+    screen.finished()
+    assert sorted(p.name for p in (tmp_path / "shrines" / "ann.lee").iterdir()) == [
+        "ann.lee.a.mp4", "ann.lee.z.grade_9-dance.mp4"]
+    assert "ann.lee.z.grade_9-dance.gif" in kept_files(pi_files)
+    assert tvs._video_names("ann.lee", ["/mnt/ssd/tv1/ann.lee/ann.lee.z.grade_9-dance.gif"],
+                            tmp_path / "x") == {"ann.lee.z.grade_9-dance.mp4"}
+
+
+def test_starting_over_on_the_hallway_puts_its_videos_there(tmp_path, monkeypatch, ffmpeg_path,
+                                                            pi_files):
+    pi_files.connection.add("/mnt/ssd/tv4/bob.ng/old.jpg")
+    tv4 = FakeTvConnection()
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {4: TvPi(tv4, 4, settings)})
+    art = _new_art(tmp_path)
+    screen = Screen(monkeypatch, chooses=["student", "over", "Digital Art", "push"],
+                    asks=["bob.ng", "", "", str(art), ""], ticks=[Screen.DEFAULT])
+    tvs.make_shrine(TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path)))
+    screen.finished()  # no hallway question
+    assert set(tv4.files) == {"bob.ng.a.mp4", "bob.ng.z.clip.mp4"}
+
+
+def test_starting_over_puts_old_art_back_if_it_cant_finish(tmp_path, monkeypatch, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/old.jpg", b"old")
+    files.add("/mnt/ssd/tv1/ann.lee.z.clip.mp4", b"loose")
+    real_rename = files.rename
+
+    def rename(old, new):
+        if old == "/mnt/ssd/tv1/.ann.lee.new":
+            raise PermissionError(13, "Permission denied")
+        real_rename(old, new)
+    monkeypatch.setattr(files, "rename", rename)
+    art = [(shrine.Media(_new_file(tmp_path, "a.png"), shrine.PICTURE, "a.png"),
+            "ann.lee.z.a.png")]
+    screen = Screen(monkeypatch)
+    old = pi_files.find("ann.lee", exact=True)
+    assert tvs._keep_new_art(pi_files, "ann.lee", 1, None, art, old, tmp_path) is None
+    assert "still has what it had before" in screen.shown("error")
+    assert files.files["/mnt/ssd/tv1/ann.lee/old.jpg"] == b"old"
+    assert files.files["/mnt/ssd/tv1/ann.lee.z.clip.mp4"] == b"loose"
+
+
+def test_names_that_arent_text_in_the_shrines_own_folder_are_asked_about(monkeypatch, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/a.jpg")
+    files.add("/mnt/ssd/tv1/ann.lee/caf\ufffd.jpg")
+    files.not_text = {"/mnt/ssd/tv1/ann.lee/caf\ufffd.jpg"}
+    screen = Screen(monkeypatch, confirms=[False])
+    tvs._add_to(TvsSettings(), Path("ffmpeg"), pi_files, ANN)
+    screen.finished()
+    assert "Some names in /mnt/ssd/tv1/ann.lee" in screen.shown("warning")
+
+
+def test_hashes_match_names_sha256sum_escapes(pi_files):
+    path = "/mnt/ssd/tv1/ann.lee/back\\slash\nnew line.png"
+    pi_files.connection.add(path, b"x")
+    assert path in pi_files.hashes([path])
 
 
 def test_new_video_names_skip_the_ones_the_tvs_have(tmp_path):
@@ -1101,7 +1261,7 @@ def test_pi_files_problems_are_reported_as_pi_files(tmp_path, monkeypatch, ffmpe
     screen = Screen(monkeypatch, asks=[str(new), ""])
     tvs._add_to(TvsSettings(shrines_dir=str(tmp_path)), ffmpeg_path, pi_files, ANN)
     assert "won't let the app save in /mnt/ssd/tv1/ann.lee" in screen.shown("error")
-    assert "hasn't been put on the TVs" in screen.shown("error")
+    assert "So nothing has changed" in screen.shown("error")
 
 
 def test_add_art_needs_pi_files(monkeypatch, tmp_path, no_pi_files):

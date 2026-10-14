@@ -20,6 +20,7 @@ import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 import paramiko
 
@@ -341,12 +342,25 @@ def _save_locally(made: list[Path], folder: Path, name: str,
 def _in_slideshow_order(name: str,
                         media: list[shrine.Media]) -> list[tuple[shrine.Media, str]]:
     """Each piece of art with the name it's kept under on pi-files, the pictures in the
-    order the slideshow shows them (the same order as when art is added later)."""
+    order the slideshow shows them (the same order as when art is added later). Videos are
+    named after what they're kept as, so their names on the TVs can be worked out again."""
     taken: set[str] = set()
     named = {stored_name(name, item.label, taken): item for item in media}
     pictures = order([s for s, item in named.items() if item.kind == shrine.PICTURE], name)
     return [(named[s], s) for s in pictures] + \
-        [(item, s) for s, item in named.items() if item.kind != shrine.PICTURE]
+        [(shrine.Media(item.path, item.kind, piece(s, name)), s)
+         for s, item in named.items() if item.kind != shrine.PICTURE]
+
+
+def _put_back(server: ArtServer, moved: list[tuple[str, str]]) -> bool:
+    """Undo set_aside()s, newest first. Returns whether it all went back."""
+    for aside, path in reversed(moved):
+        try:
+            with on_pi_files(server):
+                server.put_back(aside, path)
+        except ArtError:
+            return False
+    return True
 
 
 def _keep_new_art(server: ArtServer, name: str, tv: int, title: shrine.Title | None,
@@ -354,63 +368,70 @@ def _keep_new_art(server: ArtServer, name: str, tv: int, title: shrine.Title | N
                   work: Path) -> ArtFolder | None:
     """Copy a new shrine's art to pi-files, then move its old art (if it had some) aside.
     Returns its folder there, or None (having said why) if it couldn't."""
+    moved: list[tuple[str, str]] = []  # (where it went, where it was), to undo on failure
     try:
         with on_pi_files(server):
             server.check_room([item.path for item, _ in art])
             kept = server.folder_for(name, tv)
             staging = server.staging(kept)  # so nothing changes until it's all there
+            files = [(item.path, file_name) for item, file_name in art]
             if title is not None:
                 card = work / f"{name}.a.title.png"
                 shrine.title_card(title).save(card)
-                server.upload(staging, card, card.name)
-            if art:
-                with ui.progress(f"Keeping {name}'s art on pi-files") as update:
-                    for i, (item, file_name) in enumerate(art, start=1):
-                        server.upload(staging, item.path, file_name)
-                        update(i / len(art))
-            for folder in old:
-                for path in server.art_files(folder):
-                    if posixpath.dirname(path) != folder.path:  # its loose videos
-                        server.set_aside(path, posixpath.basename(path))
+                files.insert(0, (card, card.name))
+            with ui.progress(f"Keeping {name}'s art on pi-files") as update:
+                for i, (local, file_name) in enumerate(files, start=1):
+                    server.upload(staging, local, file_name)
+                    update(i / len(files))
+            for folder in old:  # its folder, then its loose videos
+                loose = [p for p in server.art_files(folder)
+                         if posixpath.dirname(p) != folder.path]
                 if server.connection.exists(folder.path):
-                    server.set_aside(folder.path, folder.folder)
+                    moved.append((server.set_aside(folder.path, folder.folder), folder.path))
+                for path in loose:
+                    moved.append((server.set_aside(path, posixpath.basename(path)), path))
             server.put_in_place(staging, kept)
     except ArtError as e:
-        ui.error(f"Couldn't keep its art on pi-files: {e} pi-files still has what it had "
-                 "before. The videos are on this computer, and you can put them on the TVs.")
+        where = "pi-files still has what it had before." if _put_back(server, moved) else \
+            f"Some of its old art is in {server.root}/{REPLACED} now: move it back by hand."
+        ui.error(f"Couldn't keep its art on pi-files: {e} {where} The videos are on this "
+                 "computer, and you can put them on the TVs.")
         return None
     ui.success(f"pi-files is keeping its art, in {kept.path}, so you can add to it later.")
     return kept
 
 
-def _follow_to(server: ArtServer, kept: ArtFolder, numbers: list[int]) -> None:
+def _follow_to(server: ArtServer, kept: ArtFolder, pushed: PushResult) -> None:
     """If a new shrine went on a different TV than expected, move its art to that TV's
     folder on pi-files, so adding art to it later puts it on the same TV."""
-    in_room = [n for n in numbers if n != HALLWAY] or numbers
-    if len(in_room) != 1 or in_room[0] == kept.tv:
+    chosen = [n for n in pushed.chosen if n != HALLWAY] or pushed.chosen
+    if len(chosen) != 1 or chosen[0] == kept.tv or chosen[0] not in pushed.done:
         return
     try:
         with on_pi_files(server):
-            moved = server.move(kept, in_room[0])
+            moved = server.move(kept, chosen[0])
     except ArtError as e:
-        ui.warning(f"Couldn't move its art to TV {in_room[0]}'s folder on pi-files: {e}")
+        ui.warning(f"Couldn't move its art to TV {chosen[0]}'s folder on pi-files: {e}")
         return
     if moved is None:
-        ui.warning(f"TV {in_room[0]}'s folder on pi-files already has a {kept.folder}, so its "
+        ui.warning(f"TV {chosen[0]}'s folder on pi-files already has a {kept.folder}, so its "
                    f"art stays in TV {kept.tv}'s.")
     else:
-        ui.info(f"Moved its art on pi-files to {moved.path}, since it's on TV {in_room[0]}.")
+        ui.info(f"Moved its art on pi-files to {moved.path}, since it's on TV {chosen[0]}.")
 
 
-def _video_names(name: str, old: list[str], folder: Path) -> set[str]:
+def _video_names(name: str, old: list[str], folder: Path,
+                 replaced: set[str] | frozenset[str] = frozenset()) -> set[str]:
     """The names the shrine's videos have on the TVs already, so new ones don't take them:
     worked out from its art on pi-files the way Make a shrine names them, plus any in its
-    folder on this computer."""
+    folder on this computer (except those of art being replaced, which its replacement
+    takes over, so the TVs don't play both)."""
     taken: set[str] = set()
     for path in order([p for p in old if not is_title_card(p)], name):
         shrine.video_file_name(name, piece(path, name), taken)
     if folder.is_dir():
-        taken |= {p.name for p in videos_in(folder) if shrine.is_part_of(p.name, name)}
+        gone = {shrine.video_file_name(name, piece(p, name), set()) for p in replaced}
+        taken |= {p.name for p in videos_in(folder) if shrine.is_part_of(p.name, name)} - gone
     return taken
 
 
@@ -547,9 +568,9 @@ def make_shrine(settings: TvsSettings) -> None:
                 continue
             if next_step == "push":
                 ticked = sorted({home, HALLWAY}) if old_art else None
-                numbers = push_shrine(settings, folder, name, ticked=ticked)
+                pushed = push_shrine(settings, folder, name, ticked=ticked, home=home)
                 if server is not None and kept is not None:
-                    _follow_to(server, kept, numbers)
+                    _follow_to(server, kept, pushed)
             return
 
 
@@ -611,6 +632,11 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
     name = target.name
     with on_pi_files(server):
         existing = server.art_files(target)
+    left_out = target.path in server.unreadable
+    _say_unreadable(server)
+    if left_out and not ui.confirm("Its slideshow will be made without those. Carry on?",
+                                   default=False):
+        return
     pictures = [p for p in existing if is_picture(p)]
     ui.info(f"{target.path} on pi-files has {len(pictures)} picture(s) and "
             f"{len(existing) - len(pictures)} video(s) or other file(s).")
@@ -632,14 +658,14 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
         media = _ask_for_media(ffmpeg_path, work)
         if media is None:
             return
+        media = _readable(media, work)
         planned = _plan_new_art(server, target, existing, media)
         if planned is None:
             return
-        new = [(item, file_name) for item, file_name, _ in planned]
-        replaced = {old for _, _, old in planned if old}
-        remake = title is not None or any(item.kind == shrine.PICTURE for item, _ in new) \
-            or any(is_picture(p) for p in replaced)
-        if not new and title is None:
+        replaced = {old for _, _, olds in planned for old in olds}
+        new_pictures = [(item, f) for item, f, _ in planned if item.kind == shrine.PICTURE]
+        remake = title is not None or bool(new_pictures) or any(is_picture(p) for p in replaced)
+        if not planned and title is None:
             if not ui.confirm(f"{'Nothing new was added. ' if media else ''}Make its slideshow "
                               "again from its art on pi-files, and put it on the TVs?",
                               default=bool(media)):
@@ -664,47 +690,68 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
                     continue
                 if kind == shrine.PICTURE:  # an animation's video is on the TVs already
                     slides.append((shrine.Media(path, kind, file_name), file_name))
-            slides += [(item, f) for item, f in new if item.kind == shrine.PICTURE]
+            slides += new_pictures
             if card:
                 slides.append((shrine.Media(card, shrine.PICTURE, card.name), card.name))
             by_name = {f: item for item, f in slides}
             slides = [(by_name[f], f) for f in order(list(by_name), name)]
-        videos = [item for item, _ in new if item.kind != shrine.PICTURE]
+        # Videos are named after what they're kept as.
+        videos = [shrine.Media(item.path, item.kind, piece(f, name))
+                  for item, f, _ in planned if item.kind != shrine.PICTURE]
         made, problems = shrine.make(ffmpeg_path, name, None,
                                      [item for item, _ in slides] + videos, work / "made",
-                                     ui.progress, taken=_video_names(name, old_files, folder))
+                                     ui.progress,
+                                     taken=_video_names(name, old_files, folder, replaced))
         for problem in problems:
             ui.warning(f"Left out {problem.label}: {problem.reason}")
         if not made:
             ui.error("Nothing could be made.")
             return
-        saved = _save_locally(made, folder, name, replace_all=False)
-        if saved is None:
-            return
-        failed = {problem.label for problem in problems}
-        keep = [(item, f, old) for item, f, old in planned if item.label not in failed]
+        failed = {problem.path for problem in problems if problem.path}
+        keep = [(item, f, olds) for item, f, olds in planned if item.path not in failed]
+        for item, _, olds in keep:
+            for old in olds:
+                if item.kind == shrine.PICTURE and not is_picture(old):
+                    ui.warning(f"The video of {posixpath.basename(old)} stays on the TVs; "
+                               "delete it there with 'See, copy or delete the videos on a TV'.")
+        # Copy the new art to pi-files under hidden names; it's only put in place, with the
+        # art it replaces moved aside, once it's all there and the videos are saved.
+        files = ([(card, card.name)] if card else []) + [(item.path, f) for item, f, _ in keep]
         try:
             with on_pi_files(server):
-                server.check_room([item.path for item, _, _ in keep])
-                for _, _, old in keep:
-                    if old:
+                server.check_room([local for local, _ in files])
+                server.ensure(target)
+                with ui.progress("Copying the new art to pi-files") as update:
+                    staged = server.stage(target, files, update)
+        except ArtError as e:
+            ui.error(f"Couldn't copy the new art to pi-files: {e} So nothing has changed; "
+                     "try adding the art again.")
+            return
+        before = {p.name for p in videos_in(folder)} if folder.is_dir() else set()
+        saved = _save_locally(made, folder, name, replace_all=False)
+        if saved is None:
+            server.unstage(staged)
+            return
+        moved: list[tuple[str, str]] = []
+        try:
+            with on_pi_files(server):
+                for _, _, olds in keep:
+                    for old in olds:
                         label = posixpath.basename(old)
                         if not label.lower().startswith(f"{name}."):
                             label = f"{target.folder}-{label}"
-                        server.set_aside(old, label)
-                server.ensure(target)
-                if card:
-                    server.upload(target, card, card.name)
-                if keep:
-                    with ui.progress("Copying the new art to pi-files") as update:
-                        for i, (item, file_name, _) in enumerate(keep, start=1):
-                            server.upload(target, item.path, file_name)
-                            update(i / len(keep))
+                        moved.append((server.set_aside(old, label), old))
+                server.commit(staged)
         except ArtError as e:
-            ui.error(f"Couldn't copy the new art to pi-files: {e} So it hasn't been put on the "
-                     f"TVs. Its new videos are in {folder}; try adding the art again.")
+            _put_back(server, moved)
+            server.unstage(staged)
+            for video in saved:  # so trying again doesn't give them new names
+                if video.name not in before:
+                    video.unlink(missing_ok=True)
+            ui.error(f"Couldn't copy the new art to pi-files: {e} So it hasn't been put on "
+                     "the TVs; try adding the art again.")
             return
-        if keep or card:
+        if files:
             ui.success(f"pi-files now has the new art, in {target.path}.")
     ui.success(f"Made {name}'s new videos, in {folder}:")
     for video in saved:
@@ -715,9 +762,24 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
                 home=target.tv)
 
 
+def _readable(media: list[shrine.Media], work: Path) -> list[shrine.Media]:
+    """Leave out pictures that can't be made into slides, before anything is planned with
+    them (so a damaged picture can't stand in for one it would replace)."""
+    good = []
+    for item in media:
+        if item.kind == shrine.PICTURE:
+            try:
+                shrine.prepare_picture(item.path, work / "check.png")
+            except Exception as e:  # noqa: BLE001 (a damaged or odd file; Pillow raises all sorts)
+                ui.warning(f"Left out {item.label}: couldn't read it ({e})")
+                continue
+        good.append(item)
+    return good
+
+
 def _plan_new_art(server: ArtServer, target: ArtFolder, existing: dict[str, int],
-                  media: list[shrine.Media]) -> list[tuple[shrine.Media, str, str | None]] | None:
-    """[(new art, the name to keep it under, the old file it replaces or None)].
+                  media: list[shrine.Media]) -> list[tuple[shrine.Media, str, list[str]]] | None:
+    """[(new art, the name to keep it under, the old files it replaces)].
 
     Art that's there already (the same file) is left out, so dragging in a student's whole
     folder again only adds what's new. For pieces with the same names as old ones, it asks
@@ -729,18 +791,18 @@ def _plan_new_art(server: ArtServer, target: ArtFolder, existing: dict[str, int]
     with on_pi_files(server):
         there = set(server.hashes(same_size).values())
     old_sizes = set(existing.values())
-    by_piece: dict[str, str] = {}
+    by_piece: dict[str, list[str]] = {}
     for path in existing:
         if not is_title_card(path):  # only the title card question changes that
-            by_piece.setdefault(same_piece(path, name), path)
+            by_piece.setdefault(same_piece(path, name), []).append(path)
     fresh, already, clashes = [], [], []
     for item in media:
         if sizes[item.path] in old_sizes and sha256(item.path) in there:
             already.append(item.label)
             continue
-        old = by_piece.get(same_piece(stored_name(name, item.label, set()), name))
-        fresh.append((item, old))
-        if old:
+        olds = by_piece.get(same_piece(stored_name(name, item.label, set()), name), [])
+        fresh.append((item, olds))
+        if olds:
             clashes.append(item)
     if already:
         listed = ", ".join(already[:5]) + (f" and {len(already) - 5} more"
@@ -762,15 +824,18 @@ def _plan_new_art(server: ArtServer, target: ArtFolder, existing: dict[str, int]
         if answer is None:
             return None
     taken = {posixpath.basename(p) for p in existing}
-    planned: list[tuple[shrine.Media, str, str | None]] = []
-    for item, old in fresh:
-        if old and answer == "skip":
+    claimed: set[str] = set()
+    planned: list[tuple[shrine.Media, str, list[str]]] = []
+    for item, olds in fresh:
+        if olds and answer == "skip":
             continue
-        replaces = old if old and answer == "replace" and \
-            old not in {o for _, _, o in planned} else None
-        if replaces and posixpath.dirname(replaces) == target.path:
-            taken.discard(posixpath.basename(replaces))
-        planned.append((item, stored_name(name, item.label, taken), replaces))
+        replaces = [o for o in olds if o not in claimed] if answer == "replace" else []
+        claimed.update(replaces)
+        # Only the piece that replaces an old file may take its name.
+        free = {posixpath.basename(o) for o in replaces if posixpath.dirname(o) == target.path}
+        file_name = stored_name(name, item.label, taken - free)
+        taken.add(file_name)
+        planned.append((item, file_name, replaces))
     return planned
 
 
@@ -941,10 +1006,15 @@ def _gather(ffmpeg_path: Path, source: str, work: Path, downloads: Path) -> list
 
 # --- Menu actions: the TVs -----------------------------------------------------------------
 
+class PushResult(NamedTuple):
+    chosen: list[int]  # the TVs ticked
+    done: list[int]  # the ones the videos went on
+
+
 def push_shrine(settings: TvsSettings, folder: Path | None = None, name: str | None = None,
                 *, only: set[str] | None = None, adding: bool = False,
-                ticked: list[int] | None = None, home: int | None = None) -> list[int]:
-    """Copy a shrine's videos to the TVs. Returns the TVs they went on.
+                ticked: list[int] | None = None, home: int | None = None) -> PushResult:
+    """Copy a shrine's videos to the TVs. Returns the TVs chosen, and those they went on.
 
     name: the shrine's, if known. only: copy just these videos. adding: they're new or
     remade videos for a shrine that's already on the TVs, so its others stay. ticked: the
@@ -954,11 +1024,11 @@ def push_shrine(settings: TvsSettings, folder: Path | None = None, name: str | N
     if folder is None:
         folder = _choose_shrine_folder(settings)
         if folder is None:
-            return []
+            return PushResult([], [])
     videos = [v for v in videos_in(folder) if only is None or v.name in only]
     if not videos:
         ui.error(f"There are no .mp4 videos in {folder}.")
-        return []
+        return PushResult([], [])
     uploads = upload_names(videos)
     ui.info(f"From {folder}:")
     for video, file_name in uploads.items():
@@ -971,14 +1041,14 @@ def push_shrine(settings: TvsSettings, folder: Path | None = None, name: str | N
         ui.choice(label, number, checked=number in suggested) for number, label in TVS.items()
     ], require_one=True)
     if not numbers:
-        return []
+        return PushResult([], [])
     for_hallway = uploads
     slideshow = {v: f for v, f in uploads.items() if name and f == f"{name}.a.mp4"}
     if HALLWAY in numbers and home != HALLWAY and len(slideshow) < len(uploads):
         answer = ui.confirm("Put the videos on the hallway TV (4) too? It usually only gets "
                             "the title slideshow.", default=False)
         if answer is None:
-            return []
+            return PushResult([], [])
         if not answer:
             for_hallway = slideshow
 
@@ -994,7 +1064,7 @@ def push_shrine(settings: TvsSettings, folder: Path | None = None, name: str | N
                     done.append(number)
             except (TvError, OSError, paramiko.SSHException) as e:
                 ui.error(f"{tv.name}: that didn't work ({e}).")
-    return done
+    return PushResult(numbers, done)
 
 
 def _push_to(tv: TvPi, uploads: dict[Path, str], name: str | None,

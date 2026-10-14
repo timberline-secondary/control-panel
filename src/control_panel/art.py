@@ -133,6 +133,18 @@ def _below(top: str, path: str) -> list[str]:
     return folders
 
 
+def _local_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError as e:
+        raise _unreadable_here(path, e) from e
+
+
+def _unreadable_here(path: Path, e: OSError) -> ArtError:
+    return ArtError(f"Couldn't read {path.name} on this computer ({e.strerror or e}). If it was "
+                    "on a USB stick, is it still plugged in?")
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
@@ -197,8 +209,8 @@ class ArtServer:
             return self.connection.list_folder(path)
         except UnicodeDecodeError:  # SFTP can't list it, so list it on pi-files instead
             pass
-        result = self.connection.run(f"find {shlex.quote(path)} -mindepth 1 -maxdepth 1 "
-                                     r"-printf '%Y\t%s\t%f\n'")
+        result = self.connection.run(f"find -L {shlex.quote(path)} -mindepth 1 -maxdepth 1 "
+                                     r"-printf '%y\t%s\t%f\n' 2>/dev/null")
         folders, files = [], {}
         for line in result.output.splitlines():
             kind, _, rest = line.partition("\t")
@@ -303,16 +315,17 @@ class ArtServer:
         quoted = " ".join(shlex.quote(path) for path in paths)
         result = self.connection.run(f"sha256sum -- {quoted}", timeout=600)
         hashes = {}
-        for line in result.output.splitlines():
-            if line.startswith("\\"):  # the name had a \ or a new line in it
-                line = line[1:]
-            digest, _, path = line.partition("  ")
+        for line in result.output.split("\n"):
+            escaped = line.startswith("\\")  # the name has a \ or a new line in it
+            digest, _, path = line.removeprefix("\\").partition("  ")
+            if escaped:
+                path = re.sub(r"\\(.)", lambda m: {"n": "\n", "r": "\r"}.get(m[1], m[1]), path)
             if re.fullmatch(r"[0-9a-f]{64}", digest):
                 hashes[path] = digest
         return {path: hashes[path] for path in paths if path in hashes}
 
     def check_room(self, files: list[Path]) -> None:
-        needed = sum(path.stat().st_size for path in files)
+        needed = sum(_local_size(path) for path in files)
         result = self.connection.run(f"df -Pk {shlex.quote(self.root)}")
         try:
             free = int(result.output.strip().splitlines()[-1].split()[3]) * 1024
@@ -323,11 +336,51 @@ class ArtServer:
 
     def upload(self, art: ArtFolder, local: Path, file_name: str,
                progress: Callable[[int, int], None] | None = None) -> None:
-        with local.open("rb") as f:  # a problem with the local file isn't pi-files'
+        try:
+            f = local.open("rb")
+        except OSError as e:  # a problem with the file here isn't pi-files'
+            raise _unreadable_here(local, e) from e
+        with f:
             try:
                 self.connection.upload(f, posixpath.join(art.path, file_name), progress)
             except PermissionError:
                 raise self.not_allowed(art.path) from None
+
+    def stage(self, art: ArtFolder, files: list[tuple[Path, str]],
+              progress: Progress | None = None) -> list[tuple[str, str]]:
+        """Copy files into a shrine's folder under hidden names, to be put in place all at
+        once by commit(): a copy that stops part way leaves nothing for Add art to see.
+        files: (file here, name on pi-files). Returns (hidden path, path) for each."""
+        staged: list[tuple[str, str]] = []
+        try:
+            for i, (local, file_name) in enumerate(files, start=1):
+                hidden = f".{file_name}.new"
+                self.upload(art, local, hidden)
+                staged.append((posixpath.join(art.path, hidden),
+                               posixpath.join(art.path, file_name)))
+                if progress:
+                    progress(i / len(files))
+        except BaseException:
+            self.unstage(staged)
+            raise
+        return staged
+
+    def unstage(self, staged: list[tuple[str, str]]) -> None:
+        for hidden, _ in staged:
+            try:
+                self.connection.remove(hidden)
+            except Exception:  # noqa: BLE001 (it's hidden, so it does no harm if it stays)
+                pass
+
+    def commit(self, staged: list[tuple[str, str]]) -> None:
+        for hidden, path in staged:
+            if self.connection.exists(path):  # never write over anyone's art
+                raise ArtError(f"pi-files already has {path}.")
+            self._rename(hidden, path)
+
+    def put_back(self, aside: str, path: str) -> None:
+        """Undo set_aside()."""
+        self._rename(aside, path)
 
     def download(self, paths: list[str], folder: Path,
                  progress: Progress | None = None) -> list[Path]:

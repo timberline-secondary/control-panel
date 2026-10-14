@@ -188,6 +188,7 @@ class Media:
 class Skipped:
     label: str
     reason: str
+    path: Path | None = None  # the file, if it's one that was given to make()
 
 
 def classify(ffmpeg_path: Path, path: Path) -> str:
@@ -574,7 +575,8 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
                     prepare_picture(picture.path, slide)
                     slides.append(slide)
                 except Exception as e:  # a damaged or odd file; Pillow raises all sorts
-                    problems.append(Skipped(picture.label, f"couldn't read it ({e})"))
+                    problems.append(Skipped(picture.label, f"couldn't read it ({e})",
+                                            picture.path))
                 update(i / len(pictures))
 
     if slides:
@@ -596,7 +598,7 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
                 _convert(ffmpeg_path, item, output, work_dir, update)
             made.append(output)
         except Exception as e:
-            problems.append(Skipped(item.label, f"couldn't convert it ({e})"))
+            problems.append(Skipped(item.label, f"couldn't convert it ({e})", item.path))
     return made, problems
 
 
