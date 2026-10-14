@@ -1230,6 +1230,28 @@ def test_starting_over_puts_old_art_back_if_it_cant_finish(tmp_path, monkeypatch
     assert files.files["/mnt/ssd/tv1/ann.lee.z.clip.mp4"] == b"loose"
 
 
+def test_ctrl_c_while_putting_art_in_place_puts_the_old_art_back(tmp_path, monkeypatch,
+                                                                 ffmpeg_path, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png",
+              _picture(tmp_path / "title.png", "white", (1920, 1080)))
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.png", b"old moon")
+    new = tmp_path / "new"
+    new.mkdir()
+    _picture(new / "moon.png", "blue")
+
+    def cancelled(staged):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(pi_files, "commit", cancelled)
+    Screen(monkeypatch, asks=["ann", str(new), ""], chooses=[ANN, "replace"])
+    with pytest.raises(KeyboardInterrupt):
+        tvs.add_art(TvsSettings(shrines_dir=str(tmp_path / "shrines"), ffmpeg=str(ffmpeg_path)))
+    assert files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.moon.png"] == b"old moon"
+    assert kept_files(pi_files) == ["ann.lee.a.title.png", "ann.lee.z.moon.png"]  # no .new left
+    assert not files.list_folder("/mnt/ssd/.replaced")[1]
+    assert sorted(p.name for p in (tmp_path / "shrines" / "ann.lee").iterdir()) == []
+
+
 def test_names_that_arent_text_in_the_shrines_own_folder_are_asked_about(monkeypatch, pi_files):
     files = pi_files.connection
     files.add("/mnt/ssd/tv1/ann.lee/a.jpg")

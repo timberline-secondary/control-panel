@@ -391,8 +391,11 @@ def _keep_new_art(server: ArtServer, name: str, tv: int, title: shrine.Title | N
                 for path in loose:
                     moved.append((server.set_aside(path, posixpath.basename(path)), path))
             server.put_in_place(staging, kept)
-    except ArtError as e:
-        where = "pi-files still has what it had before." if _put_back(server, moved) else \
+    except BaseException as e:  # Ctrl+C too: never leave old art aside, half done
+        restored = _put_back(server, moved)
+        if not isinstance(e, ArtError):
+            raise
+        where = "pi-files still has what it had before." if restored else \
             f"Some of its old art is in {server.root}/{REPLACED} now: move it back by hand."
         ui.error(f"Couldn't keep its art on pi-files: {e} {where} The videos are on this "
                  "computer, and you can put them on the TVs.")
@@ -742,12 +745,14 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
                             label = f"{target.folder}-{label}"
                         moved.append((server.set_aside(old, label), old))
                 server.commit(staged)
-        except ArtError as e:
+        except BaseException as e:  # Ctrl+C too: never leave old art aside, half done
             _put_back(server, moved)
             server.unstage(staged)
             for video in saved:  # so trying again doesn't give them new names
                 if video.name not in before:
                     video.unlink(missing_ok=True)
+            if not isinstance(e, ArtError):
+                raise
             ui.error(f"Couldn't copy the new art to pi-files: {e} So it hasn't been put on "
                      "the TVs; try adding the art again.")
             return
