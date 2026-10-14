@@ -991,7 +991,8 @@ def test_nothing_new_can_still_make_the_slideshow_again(tmp_path, monkeypatch, f
 
 def test_nothing_changes_on_pi_files_if_making_the_videos_stops(tmp_path, monkeypatch,
                                                                  pi_files):
-    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png")
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png",
+                            _picture(tmp_path / "title.png", "white"))
     before = dict(pi_files.connection.files)
 
     def cancelled(*args, **kwargs):
