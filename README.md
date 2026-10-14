@@ -63,7 +63,7 @@ videos made on your computer:
 | Menu item | What it does |
 | --- | --- |
 | Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). Pictures are shown in the order of their names, and subfolders are included. The student's own files are never moved or changed. The videos are saved in `Documents\Hackerspace shrines\<name>`, and the original art and title card are kept on pi-files (below). If pi-files already has art for them, you can add to it or start over. |
-| Add art to a shrine | Like the old Linux control panel: type part of the student's username, then drag in or paste their new art. It's copied to their folder on pi-files, and their slideshow is made again from all the pictures there. Only the new slideshow and new videos are copied to the TVs (their TV, plus the hallway). Art that's already there is skipped, so you can drag in their whole folder again. If they have no title card yet, it offers to make one. |
+| Add art to a shrine | Like the old Linux control panel: type part of the student's username, then drag in or paste their new art. It's copied to their folder on pi-files, and their slideshow is made again from all the pictures there. Only the new slideshow and new videos are copied to the TVs (their TV, plus the hallway). Art that's already there is skipped, so you can drag in their whole folder again; if some pieces have the same names as old ones (hightower saved some pictures again), it asks whether to replace them, leave them out or keep both. If they have no title card yet, it offers to make one. If nothing new is added, it offers to make the slideshow again from what's on pi-files. |
 | Put a shrine on the TVs | Suggests the TV from the student's last name, plus the hallway. Shows what that student already has on each TV and asks whether to replace it. Checks there's room, copies the videos, then restarts the slideshow so it plays them. |
 | See, copy or delete the videos on a TV | List and search a TV's videos, copy some to this computer, or delete some. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |
@@ -93,8 +93,10 @@ folder for each TV, and in it a folder for each student or collection:
 ```
 
 Art copied there by hand can have any names, and videos left loose in a TV's folder
-(`tv1/ann.lee.z.clip.mp4`, as on hightower) are fine. A student's TV is the folder their art is
-in; if a new shrine is put on a different TV, its art moves to that TV's folder.
+(`tv1/ann.lee.z.clip.mp4`, as on hightower) count as the student's too, even if they have no
+folder. A student's TV is the folder their art is in; if a new shrine is put on a different TV,
+its art moves to that TV's folder. Videos and animations are only converted when they're added,
+since the TVs have the old ones already.
 
 To set one up: Raspberry Pi OS Lite, with the hostname `pi-files`, the user `pi` with the same
 password as the TVs, and SSH turned on (all in Raspberry Pi Imager's settings). Format the drive as

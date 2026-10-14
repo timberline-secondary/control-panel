@@ -14,7 +14,8 @@ class FakeFilesConnection:
     locked: folders the app isn't allowed to change (e.g. they belong to root).
     """
 
-    def __init__(self, mounted=True, free_kb=100_000_000, locked=(), read_only=False):
+    def __init__(self, mounted=True, free_kb=100_000_000, locked=(), read_only=False,
+                 not_text=()):
         self.host = "pi-files.hackerspace.tbl"
         self.files = {}  # path: contents
         self.dirs = {"/", "/mnt", "/mnt/ssd"}
@@ -22,6 +23,7 @@ class FakeFilesConnection:
         self.free_kb = free_kb
         self.locked = set(locked)
         self.read_only = read_only
+        self.not_text = set(not_text)  # names that aren't UTF-8 (shown as \ufffd by run)
         self.commands = []
 
     def add(self, path, data=b"art"):
@@ -38,6 +40,13 @@ class FakeFilesConnection:
             mount = "/mnt/ssd" if self.mounted else "/"
             return CommandResult(0, "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
                                     f"/dev/sda1 1000000 10 {self.free_kb} 1% {mount}\n")
+        if command.startswith("find "):
+            folder = shlex.split(command)[1]
+            inside = {p for p in self.dirs | set(self.files)
+                      if posixpath.dirname(p) == folder and p != folder}
+            return CommandResult(0, "".join(
+                f"{'d' if p in self.dirs else 'f'}\t{len(self.files.get(p, b''))}\t"
+                f"{posixpath.basename(p)}\n" for p in sorted(inside)))
         if command.startswith("sha256sum -- "):
             lines = [f"{hashlib.sha256(self.files[path]).hexdigest()}  {path}"
                      for path in shlex.split(command)[2:] if path in self.files]
@@ -50,6 +59,8 @@ class FakeFilesConnection:
     def list_folder(self, path):
         if path not in self.dirs:
             raise FileNotFoundError(path)
+        if any(posixpath.dirname(p) == path for p in self.not_text):
+            raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
         inside = {p for p in self.dirs | set(self.files)
                   if posixpath.dirname(p) == path and p != path}
         return (sorted(posixpath.basename(p) for p in inside if p in self.dirs),

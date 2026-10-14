@@ -47,7 +47,8 @@ class ArtError(Exception):
 
 @dataclass(frozen=True)
 class ArtFolder:
-    """One shrine's folder on pi-files."""
+    """One shrine's folder on pi-files. (A shrine hightower only kept videos for has none
+    yet: it's made when art is first added.)"""
 
     tv: int
     path: str  # e.g. /mnt/ssd/tv1/ann.lee
@@ -63,7 +64,7 @@ class ArtFolder:
 
 
 def is_title_card(file_name: str) -> bool:
-    return ".a.title." in file_name.lower()
+    return ".a.title." in posixpath.basename(file_name).lower()
 
 
 def is_picture(file_name: str) -> bool:
@@ -73,8 +74,8 @@ def is_picture(file_name: str) -> bool:
 
 def piece(file_name: str, name: str) -> str:
     """The piece's own name, without the shrine's name in front: 'ann.lee.z.sun.jpg' ->
-    'sun.jpg'. Pictures are shown in this order, and new art with the same piece name as
-    old art is asked about."""
+    'sun.jpg'. Pictures are shown in this order."""
+    file_name = posixpath.basename(file_name)
     lowered = file_name.lower()
     for prefix in (f"{name}.z.", f"{name}.a.", f"{name}."):
         if lowered.startswith(prefix):
@@ -82,6 +83,13 @@ def piece(file_name: str, name: str) -> str:
             break
     stem, ext = posixpath.splitext(file_name)
     return _piece_stem(stem) + _extension(ext)
+
+
+def same_piece(file_name: str, name: str) -> str:
+    """What new art is compared with, to ask before it replaces old art: the piece's name,
+    without the type for pictures (hightower turned some GIFs and JPEGs into PNGs)."""
+    stem, ext = posixpath.splitext(piece(file_name, name))
+    return stem + (".picture" if is_picture(file_name) else ext)
 
 
 def _piece_stem(stem: str) -> str:
@@ -94,18 +102,23 @@ def _extension(ext: str) -> str:
 
 def order(file_names: list[str], name: str) -> list[str]:
     """The order a slideshow shows them in: title card first, then by piece name."""
-    return sorted(file_names, key=lambda f: (not is_title_card(f),
-                                             shrine.natural_key(piece(f, name)), f))
+    def key(file_name: str) -> tuple:
+        stem, ext = posixpath.splitext(piece(file_name, name))
+        return not is_title_card(file_name), shrine.natural_key(stem), ext, file_name
+    return sorted(file_names, key=key)
 
 
 def stored_name(name: str, label: str, taken: set[str]) -> str:
     """<name>.z.<piece>.<ext>, the name new art is kept under (made unique among taken,
-    which it's added to). label is its name where it came from, e.g. 'sub/Sun Set.JPG'."""
-    stem, ext = posixpath.splitext(posixpath.basename(label))
-    stem, ext = _piece_stem(stem), _extension(ext)
+    which it's added to). label is its name where it came from, e.g. 'Grade 9/Sun Set.JPG'
+    (its folders are kept in the name, so the slideshow keeps them together)."""
+    *folders, file_name = label.split("/")
+    stem, ext = posixpath.splitext(file_name)
+    folders = [f for f in folders if not f.lower().endswith(".zip")]
+    stem, ext = _piece_stem("-".join([*folders, stem])), _extension(ext)
     lowered = {t.lower() for t in taken}
     candidate, n = f"{name}.z.{stem}{ext}", 2
-    while candidate in lowered:
+    while candidate.lower() in lowered:
         candidate, n = f"{name}.z.{stem}-{n}{ext}", n + 1
     taken.add(candidate)
     return candidate
@@ -140,6 +153,7 @@ class ArtServer:
         self.settings = settings
         self.root = settings.art_dir.rstrip("/") or "/"
         self.host = settings.art_host
+        self.unreadable: set[str] = set()  # folders with names in them that aren't text
 
     def check_drive(self) -> None:
         """Make sure the art folder is on its own drive (not the Pi's SD card), and that the
@@ -150,10 +164,10 @@ class ArtServer:
         existing = self.root
         while existing != "/" and not self.connection.exists(existing):
             existing = posixpath.dirname(existing)
-        result = self.connection.run(f"df -P {shlex.quote(existing)}")
+        result = self.connection.run(f"df -Pk {shlex.quote(existing)}")
         lines = result.output.strip().splitlines()
-        mounted_at = lines[-1].split()[-1] if result.ok and len(lines) > 1 else None
-        if mounted_at in (None, "/"):
+        fields = lines[-1].split() if result.ok and len(lines) > 1 else []
+        if len(fields) < 6 or fields[-1] == "/":
             raise ArtError(f"{self.root} on {self.host} isn't on the external drive. Is the "
                            "drive plugged in and mounted?")
         check = posixpath.join(self.root, CHECK_FILE)
@@ -163,8 +177,14 @@ class ArtServer:
             self.connection.upload(io.BytesIO(b"ok\n"), check)
             self.connection.remove(check)
         except PermissionError:
+            if existing != self.root:
+                raise ArtError(f"pi-files won't let the app make {self.root}. On pi-files, "
+                               f"run: sudo mkdir -p {self.root} && "
+                               f"sudo chown -R {self.settings.username}: {self.root}") from None
             raise self.not_allowed(self.root) from None
         except OSError as e:
+            if fields[3].isdigit() and int(fields[3]) < 1024:
+                raise ArtError(f"The drive on {self.host} is full.") from e
             raise ArtError(f"Couldn't save anything in {self.root} on {self.host} ({e}). Its "
                            "drive may have gone read-only: try restarting pi-files.") from e
 
@@ -172,48 +192,97 @@ class ArtServer:
         return ArtError(f"pi-files won't let the app save in {path}. On pi-files, run: "
                         f"sudo chown -R {self.settings.username}: {self.root}")
 
-    def tv_folders(self) -> dict[int, str]:
-        """{TV number: its folder}, for the TV folders there are (tv1, TV 2...)."""
-        folders: dict[int, str] = {}
-        for entry in sorted(self.connection.list_folder(self.root)[0]):
+    def _list(self, path: str) -> tuple[list[str], dict[str, int]]:
+        try:
+            return self.connection.list_folder(path)
+        except UnicodeDecodeError:  # SFTP can't list it, so list it on pi-files instead
+            pass
+        result = self.connection.run(f"find {shlex.quote(path)} -mindepth 1 -maxdepth 1 "
+                                     r"-printf '%Y\t%s\t%f\n'")
+        folders, files = [], {}
+        for line in result.output.splitlines():
+            kind, _, rest = line.partition("\t")
+            size, _, file_name = rest.partition("\t")
+            if "\ufffd" in file_name or not file_name or not size.isdigit():
+                self.unreadable.add(path)  # left out, as it can't be named
+            elif kind == "d":
+                folders.append(file_name)
+            elif kind == "f":
+                files[file_name] = int(size)
+        return folders, files
+
+    def tv_folders(self) -> dict[int, list[str]]:
+        """{TV number: its folders}, for the TV folders there are (tv1, TV 2...). The one
+        new shrines go in comes first."""
+        folders: dict[int, list[str]] = {}
+        for entry in sorted(self._list(self.root)[0], key=lambda e: (e.lower() != e, e)):
             match = _TV_FOLDER.fullmatch(entry)
             if match:
-                folders.setdefault(int(match.group(1)), posixpath.join(self.root, entry))
+                folders.setdefault(int(match.group(1)), []).append(
+                    posixpath.join(self.root, entry))
         return folders
 
+    def _tv_folder(self, tv: int) -> str:
+        return (self.tv_folders().get(tv) or [posixpath.join(self.root, f"tv{tv}")])[0]
+
     def find(self, text: str, *, exact: bool = False) -> list[ArtFolder]:
-        """The shrines whose folder names have text in them (or are text, if exact), in
-        TV order, then name order."""
+        """The shrines whose names have text in them (or are text, if exact), in TV order,
+        then name order. Includes shrines hightower only kept loose videos for."""
         wanted = text.casefold()
+
+        def matches(art: ArtFolder) -> bool:
+            if exact:
+                return wanted in (art.name, art.folder.casefold())
+            return wanted in art.folder.casefold()
+
         found = []
-        for tv, tv_path in sorted(self.tv_folders().items()):
-            for folder in self.connection.list_folder(tv_path)[0]:
-                art = ArtFolder(tv, posixpath.join(tv_path, folder), folder)
-                if folder.startswith("."):
-                    continue
-                if (art.name == wanted or folder.casefold() == wanted) if exact \
-                        else wanted in folder.casefold():
-                    found.append(art)
-        return sorted(found, key=lambda a: (a.tv, shrine.natural_key(a.folder)))
+        for tv, tv_paths in sorted(self.tv_folders().items()):
+            for tv_path in tv_paths:
+                folders, files = self._list(tv_path)
+                shrines = {f for f in folders if not f.startswith(".")}
+                have = {f.casefold() for f in shrines}
+                for file_name in files:  # videos only, no folder
+                    owner = file_name.split(".z.", 1)[0] if ".z." in file_name else ""
+                    if owner and not owner.startswith(".") and owner.casefold() not in have:
+                        shrines.add(owner)
+                        have.add(owner.casefold())
+                found += [art for art in (ArtFolder(tv, posixpath.join(tv_path, f), f)
+                                          for f in shrines) if matches(art)]
+        return sorted(found, key=lambda a: (a.tv, shrine.natural_key(a.folder), a.path))
 
-    def files(self, art: ArtFolder) -> dict[str, int]:
-        """{file name: size} for the art in a shrine's folder."""
-        files = self.connection.list_folder(art.path)[1]
-        return {name: size for name, size in files.items() if not name.startswith(".")}
-
-    def loose_videos(self, art: ArtFolder) -> list[str]:
-        """The shrine's videos in its TV's folder, as hightower kept them."""
+    def art_files(self, art: ArtFolder) -> dict[str, int]:
+        """{path: size} for a shrine's art: what's in its folder, and its loose videos."""
+        files = {}
+        if self.connection.exists(art.path):
+            files = {posixpath.join(art.path, f): size for f, size in self._list(art.path)[1]
+                     .items() if not f.startswith(".")}
         tv_path = posixpath.dirname(art.path)
-        return [f for f in self.connection.list_folder(tv_path)[1]
-                if f.lower().startswith(f"{art.name}.z.") and not is_picture(f)]
+        for file_name, size in self._list(tv_path)[1].items():
+            if file_name.lower().startswith(f"{art.name}.z.") and not is_picture(file_name):
+                files[posixpath.join(tv_path, file_name)] = size
+        return files
 
     def folder_for(self, name: str, tv: int) -> ArtFolder:
-        """A new shrine's folder (made, along with its TV's folder if need be)."""
-        tv_path = self.tv_folders().get(tv) or posixpath.join(self.root, f"tv{tv}")
-        art = ArtFolder(tv, posixpath.join(tv_path, name), name)
-        for path in (tv_path, art.path):
+        """Where a new shrine's art goes, in its TV's folder (which is made if need be)."""
+        tv_path = self._tv_folder(tv)
+        self._mkdir(tv_path)
+        return ArtFolder(tv, posixpath.join(tv_path, name), name)
+
+    def staging(self, final: ArtFolder) -> ArtFolder:
+        """A hidden, empty folder to copy a new shrine's art into, before it's put in place."""
+        path = posixpath.join(posixpath.dirname(final.path), f".{final.folder}.new")
+        if self.connection.exists(path):  # left from a try that didn't finish
+            self.set_aside(path, f"{final.folder}-unfinished")
+        self._mkdir(path)
+        return ArtFolder(final.tv, path, final.folder)
+
+    def put_in_place(self, staging: ArtFolder, final: ArtFolder) -> None:
+        self._rename(staging.path, final.path)
+
+    def ensure(self, art: ArtFolder) -> None:
+        """Make a shrine's folder, if it's one hightower only kept videos for."""
+        for path in (posixpath.dirname(art.path), art.path):
             self._mkdir(path)
-        return art
 
     def _mkdir(self, path: str) -> None:
         try:
@@ -221,18 +290,26 @@ class ArtServer:
         except PermissionError:
             raise self.not_allowed(posixpath.dirname(path)) from None
 
-    def hashes(self, art: ArtFolder, file_names: list[str]) -> dict[str, str]:
-        """{file name: sha256} for some of the files in a shrine's folder."""
-        if not file_names:
+    def _rename(self, old: str, new: str) -> None:
+        try:
+            self.connection.rename(old, new)
+        except PermissionError:
+            raise self.not_allowed(posixpath.dirname(old)) from None
+
+    def hashes(self, paths: list[str]) -> dict[str, str]:
+        """{path: sha256} for some files."""
+        if not paths:
             return {}
-        paths = " ".join(shlex.quote(posixpath.join(art.path, f)) for f in file_names)
-        result = self.connection.run(f"sha256sum -- {paths}", timeout=600)
+        quoted = " ".join(shlex.quote(path) for path in paths)
+        result = self.connection.run(f"sha256sum -- {quoted}", timeout=600)
         hashes = {}
         for line in result.output.splitlines():
+            if line.startswith("\\"):  # the name had a \ or a new line in it
+                line = line[1:]
             digest, _, path = line.partition("  ")
             if re.fullmatch(r"[0-9a-f]{64}", digest):
-                hashes[posixpath.basename(path)] = digest
-        return hashes
+                hashes[path] = digest
+        return {path: hashes[path] for path in paths if path in hashes}
 
     def check_room(self, files: list[Path]) -> None:
         needed = sum(path.stat().st_size for path in files)
@@ -246,50 +323,44 @@ class ArtServer:
 
     def upload(self, art: ArtFolder, local: Path, file_name: str,
                progress: Callable[[int, int], None] | None = None) -> None:
-        try:
-            with local.open("rb") as f:
+        with local.open("rb") as f:  # a problem with the local file isn't pi-files'
+            try:
                 self.connection.upload(f, posixpath.join(art.path, file_name), progress)
-        except PermissionError:
-            raise self.not_allowed(art.path) from None
+            except PermissionError:
+                raise self.not_allowed(art.path) from None
 
-    def download(self, art: ArtFolder, file_names: list[str], folder: Path,
+    def download(self, paths: list[str], folder: Path,
                  progress: Progress | None = None) -> list[Path]:
-        """Copy some of a shrine's files here, in the same order. They're saved under
-        numbers, since names from pi-files might not be safe ones on Windows."""
+        """Copy some files here, in the same order. They're saved under numbers, since names
+        from pi-files might not be safe ones on Windows."""
         folder.mkdir(parents=True, exist_ok=True)
-        paths = []
-        for i, file_name in enumerate(file_names, start=1):
-            path = folder / f"{i:04d}{_extension(posixpath.splitext(file_name)[1])}"
-            self.connection.download(posixpath.join(art.path, file_name), path)
-            paths.append(path)
+        got = []
+        for i, path in enumerate(paths, start=1):
+            local = folder / f"{i:04d}{_extension(posixpath.splitext(path)[1])}"
+            self.connection.download(path, local)
+            got.append(local)
             if progress:
-                progress(i / len(file_names))
-        return paths
+                progress(i / len(paths))
+        return got
 
     def set_aside(self, path: str, label: str) -> str:
         """Move a folder or file into .replaced, rather than deleting anyone's art."""
         aside = posixpath.join(self.root, REPLACED)
         self._mkdir(aside)
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        base, n = posixpath.join(aside, f"{label}-{stamp}"), 2
+        base, n = posixpath.join(aside, f"{stamp}-{label}"), 2
         target = base
         while self.connection.exists(target):
             target, n = f"{base}-{n}", n + 1
-        try:
-            self.connection.rename(path, target)
-        except PermissionError:
-            raise self.not_allowed(posixpath.dirname(path)) from None
+        self._rename(path, target)
         return target
 
     def move(self, art: ArtFolder, tv: int) -> ArtFolder | None:
         """Move a shrine's folder to another TV's folder. None if there's one there already."""
-        tv_path = self.tv_folders().get(tv) or posixpath.join(self.root, f"tv{tv}")
+        tv_path = self._tv_folder(tv)
         moved = ArtFolder(tv, posixpath.join(tv_path, art.folder), art.folder)
         self._mkdir(tv_path)
         if self.connection.exists(moved.path):
             return None
-        try:
-            self.connection.rename(art.path, moved.path)
-        except PermissionError:
-            raise self.not_allowed(posixpath.dirname(art.path)) from None
+        self._rename(art.path, moved.path)
         return moved

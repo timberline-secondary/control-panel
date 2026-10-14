@@ -17,7 +17,8 @@ ANN = ArtFolder(1, "/mnt/ssd/tv1/ann.lee", "ann.lee")
 
 @pytest.mark.parametrize("label, expected", [
     ("Sunset at the Lake.JPG", "ann.lee.z.sunset_at_the_lake.jpg"),
-    ("art/v2.final.png", "ann.lee.z.v2-final.png"),
+    ("art/v2.final.png", "ann.lee.z.art-v2-final.png"),  # folders are kept together
+    ("art.zip/v2.png", "ann.lee.z.v2.png"),
     ("作品.png", "ann.lee.z.art.png"),
     ("from a link", "ann.lee.z.from_a_link"),
     ("x" * 300 + ".png", "ann.lee.z." + "x" * art.MAX_PIECE_NAME + ".png"),
@@ -34,11 +35,14 @@ def test_stored_names_are_unique():
 
 def test_pieces_and_the_slideshow_order():
     files = ["ann.lee.z.pic_10.jpg", "Sunset.JPG", "ann.lee.a.title.png", "ann.lee.z.pic_2.jpg",
-             "apple.png"]
+             "apple.png", "ann.lee.z.apple-2.png"]
     # Title card first, then by the piece's own name, however it was named.
     assert art.order(files, "ann.lee") == [
-        "ann.lee.a.title.png", "apple.png", "ann.lee.z.pic_2.jpg", "ann.lee.z.pic_10.jpg",
-        "Sunset.JPG"]
+        "ann.lee.a.title.png", "apple.png", "ann.lee.z.apple-2.png", "ann.lee.z.pic_2.jpg",
+        "ann.lee.z.pic_10.jpg", "Sunset.JPG"]
+    # Hightower turned some pictures into PNGs, so the type doesn't matter for those.
+    assert art.same_piece("ann.lee.z.Sun.png", "ann.lee") == art.same_piece("sun.jpg", "ann.lee")
+    assert art.same_piece("sun.mp4", "ann.lee") != art.same_piece("sun.jpg", "ann.lee")
     assert art.piece("ann.lee.z.Sun Set.JPG", "ann.lee") == "sun_set.jpg"
     assert art.piece("Sun Set.jpg", "ann.lee") == "sun_set.jpg"
 
@@ -65,8 +69,14 @@ def test_check_drive_explains_a_drive_it_cant_write_to():
     server, _ = make_server(locked={"/mnt/ssd"})
     with pytest.raises(ArtError, match="sudo chown -R pi: /mnt/ssd"):
         server.check_drive()
+    server, _ = make_server(art_dir="/mnt/ssd/art", locked={"/mnt/ssd"})
+    with pytest.raises(ArtError, match="sudo mkdir -p /mnt/ssd/art && sudo chown"):
+        server.check_drive()
     server, _ = make_server(read_only=True)
     with pytest.raises(ArtError, match="read-only"):
+        server.check_drive()
+    server, _ = make_server(read_only=True, free_kb=0)
+    with pytest.raises(ArtError, match="full"):
         server.check_drive()
 
 
@@ -87,14 +97,37 @@ def test_find_shrines_in_the_tv_folders():
     assert server.find("skills-canada", exact=True)[0].path == "/mnt/ssd/tv3/Skills Canada"
 
 
-def test_files_and_loose_videos():
+def test_art_files_include_loose_videos():
     server, connection = make_server()
     for path in ["/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png", "/mnt/ssd/tv1/ann.lee/.x.part",
                  "/mnt/ssd/tv1/ann.lee.z.clip.avi", "/mnt/ssd/tv1/ann.lee.a.mp4",
                  "/mnt/ssd/tv1/ann.leeson.z.clip.avi"]:
         connection.add(path)
-    assert server.files(ANN) == {"ann.lee.a.title.png": 3}
-    assert server.loose_videos(ANN) == ["ann.lee.z.clip.avi"]  # as hightower kept them
+    assert server.art_files(ANN) == {"/mnt/ssd/tv1/ann.lee/ann.lee.a.title.png": 3,
+                                     "/mnt/ssd/tv1/ann.lee.z.clip.avi": 3}
+
+
+def test_shrines_with_only_loose_videos_are_found():
+    server, connection = make_server()
+    connection.add("/mnt/ssd/tv2/zed.moore.z.clip.mp4")
+    connection.add("/mnt/ssd/tv2/zed.moore.z.dance.mp4")
+    connection.add("/mnt/ssd/tv2/zed.moore.a.mp4")  # a slideshow, not art
+    connection.add("/mnt/ssd/tv2/bob.ng.a.mp4")
+    zed = ArtFolder(2, "/mnt/ssd/tv2/zed.moore", "zed.moore")
+    assert server.find("o") == [zed]
+    assert server.art_files(zed) == {"/mnt/ssd/tv2/zed.moore.z.clip.mp4": 3,
+                                     "/mnt/ssd/tv2/zed.moore.z.dance.mp4": 3}
+    server.ensure(zed)
+    assert connection.exists(zed.path)
+
+
+def test_every_folder_for_a_tv_is_searched():
+    server, connection = make_server()
+    connection.add("/mnt/ssd/tv1/ann.lee/a.jpg")
+    connection.add("/mnt/ssd/TV1/bob.lee/b.jpg")
+    assert server.tv_folders() == {1: ["/mnt/ssd/tv1", "/mnt/ssd/TV1"]}
+    assert [a.folder for a in server.find("lee")] == ["ann.lee", "bob.lee"]
+    assert server.folder_for("cy.lee", 1).path == "/mnt/ssd/tv1/cy.lee"
 
 
 def test_new_shrine_folders_go_in_the_tv_folder():
@@ -102,7 +135,18 @@ def test_new_shrine_folders_go_in_the_tv_folder():
     connection.add("/mnt/ssd/TV1/bob.lee/a.jpg")
     assert server.folder_for("ann.lee", 1).path == "/mnt/ssd/TV1/ann.lee"
     assert server.folder_for("sam.moe", 2).path == "/mnt/ssd/tv2/sam.moe"
-    assert "/mnt/ssd/tv2/sam.moe" in connection.dirs
+    assert "/mnt/ssd/tv2" in connection.dirs
+
+
+def test_staging_starts_empty():
+    server, connection = make_server()
+    connection.add("/mnt/ssd/tv1/.ann.lee.new/left-over.jpg")
+    staging = server.staging(server.folder_for("ann.lee", 1))
+    assert staging.path == "/mnt/ssd/tv1/.ann.lee.new"
+    assert connection.list_folder(staging.path) == ([], {})
+    assert server.find("ann") == []  # hidden until it's put in place
+    server.put_in_place(staging, ANN)
+    assert server.find("ann") == [ANN]
 
 
 def test_a_locked_folder_is_explained(tmp_path):
@@ -120,9 +164,10 @@ def test_upload_download_and_hashes(tmp_path):
     picture = tmp_path / "new.png"
     Image.new("RGB", (4, 4), "blue").save(picture)
     server.upload(ANN, picture, "ann.lee.z.new.png")
-    assert server.hashes(ANN, ["ann.lee.z.new.png"]) == {"ann.lee.z.new.png": art.sha256(picture)}
+    new = "/mnt/ssd/tv1/ann.lee/ann.lee.z.new.png"
+    assert server.hashes([new, "/mnt/ssd/tv1/ann.lee/missing.png"]) == {new: art.sha256(picture)}
     # Saved under numbers, whatever they're called on pi-files.
-    got = server.download(ANN, ["ann.lee.z.new.png", "old.png"], tmp_path / "got")
+    got = server.download([new, "/mnt/ssd/tv1/ann.lee/old.png"], tmp_path / "got")
     assert [p.name for p in got] == ["0001.png", "0002.png"]
     assert got[0].read_bytes() == picture.read_bytes()
 
@@ -132,7 +177,7 @@ def test_set_aside_and_move():
     connection.add("/mnt/ssd/tv1/ann.lee/a.jpg")
     connection.add("/mnt/ssd/tv1/ann.lee/b.jpg")
     aside = server.set_aside("/mnt/ssd/tv1/ann.lee/b.jpg", "ann.lee.b.jpg")
-    assert aside.startswith("/mnt/ssd/.replaced/ann.lee.b.jpg-")
+    assert aside.startswith("/mnt/ssd/.replaced/") and aside.endswith("-ann.lee.b.jpg")
     assert connection.files[aside] == b"art"
     moved = server.move(ANN, 2)
     assert moved == ArtFolder(2, "/mnt/ssd/tv2/ann.lee", "ann.lee")

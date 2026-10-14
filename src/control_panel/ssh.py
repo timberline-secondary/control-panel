@@ -159,9 +159,16 @@ class PiConnection:
                 if a.st_mode is not None and stat.S_ISREG(a.st_mode)}
 
     def list_folder(self, path: str) -> tuple[list[str], dict[str, int]]:
-        """(the folders in a folder, {name: size in bytes} for its files)."""
+        """(the folders in a folder, {name: size in bytes} for its files). Links count as
+        what they link to."""
         folders, files = [], {}
         for a in self.sftp.listdir_attr(path):
+            if a.st_mode is not None and stat.S_ISLNK(a.st_mode):
+                try:
+                    target = self.sftp.stat(posixpath.join(path, a.filename))
+                except OSError:
+                    continue  # it links to nothing
+                a.st_mode, a.st_size = target.st_mode, target.st_size
             if a.st_mode is not None and stat.S_ISDIR(a.st_mode):
                 folders.append(a.filename)
             elif a.st_mode is not None and stat.S_ISREG(a.st_mode):
