@@ -188,6 +188,7 @@ class Media:
 class Skipped:
     label: str
     reason: str
+    path: Path | None = None  # the file, if it's one that was given to make()
 
 
 def classify(ffmpeg_path: Path, path: Path) -> str:
@@ -548,11 +549,13 @@ Progress = Callable[[str], AbstractContextManager[Callable[[float], None]]]
 
 
 def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
-         work_dir: Path, progress: Progress) -> tuple[list[Path], list[Skipped]]:
+         work_dir: Path, progress: Progress,
+         taken: set[str] | None = None) -> tuple[list[Path], list[Skipped]]:
     """Make the shrine's videos in work_dir. Returns (the videos, what couldn't be used).
 
     progress(label) is a context manager giving a function to report progress (0 to 1).
     One file that can't be used is reported, rather than stopping the whole shrine.
+    taken: video names the shrine already has, so new ones don't replace them.
     """
     made: list[Path] = []
     problems: list[Skipped] = []
@@ -572,7 +575,8 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
                     prepare_picture(picture.path, slide)
                     slides.append(slide)
                 except Exception as e:  # a damaged or odd file; Pillow raises all sorts
-                    problems.append(Skipped(picture.label, f"couldn't read it ({e})"))
+                    problems.append(Skipped(picture.label, f"couldn't read it ({e})",
+                                            picture.path))
                 update(i / len(pictures))
 
     if slides:
@@ -586,7 +590,7 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
         except Exception as e:
             problems.append(Skipped("the slideshow", f"couldn't make it ({e})"))
 
-    taken: set[str] = set()
+    taken = set(taken or ())
     for item in (m for m in media if m.kind in (VIDEO, ANIMATION)):
         output = work_dir / video_file_name(name, item.label, taken)
         try:
@@ -594,7 +598,7 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
                 _convert(ffmpeg_path, item, output, work_dir, update)
             made.append(output)
         except Exception as e:
-            problems.append(Skipped(item.label, f"couldn't convert it ({e})"))
+            problems.append(Skipped(item.label, f"couldn't convert it ({e})", item.path))
     return made, problems
 
 
@@ -620,14 +624,17 @@ def _convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
     shutil.rmtree(folder, ignore_errors=True)
 
 
-def save(made: list[Path], folder: Path, name: str) -> list[Path]:
-    """Copy newly made videos into folder, in place of the shrine's old ones there.
+def save(made: list[Path], folder: Path, name: str, replace_all: bool = True) -> list[Path]:
+    """Copy newly made videos into folder, in place of the shrine's old ones there (or, with
+    replace_all=False, only the ones with the same names, as when adding art).
 
     All or nothing: if something's in the way (e.g. Windows won't let go of an old video
     because it's open in a video player), OSError is raised and the folder is as it was.
     """
     folder.mkdir(parents=True, exist_ok=True)
-    old = [path for path in folder.glob("*.mp4") if is_part_of(path.name, name)]
+    new_names = {video.name for video in made}
+    old = [path for path in folder.glob("*.mp4") if is_part_of(path.name, name)
+           and (replace_all or path.name in new_names)]
     aside: list[tuple[Path, Path]] = []
     placed: list[Path] = []
     try:

@@ -158,12 +158,40 @@ class PiConnection:
         return {a.filename: a.st_size or 0 for a in self.sftp.listdir_attr(path)
                 if a.st_mode is not None and stat.S_ISREG(a.st_mode)}
 
+    def list_folder(self, path: str) -> tuple[list[str], dict[str, int]]:
+        """(the folders in a folder, {name: size in bytes} for its files). Links count as
+        what they link to."""
+        folders, files = [], {}
+        for a in self.sftp.listdir_attr(path):
+            if a.st_mode is not None and stat.S_ISLNK(a.st_mode):
+                try:
+                    target = self.sftp.stat(posixpath.join(path, a.filename))
+                except OSError:
+                    continue  # it links to nothing
+                a.st_mode, a.st_size = target.st_mode, target.st_size
+            if a.st_mode is not None and stat.S_ISDIR(a.st_mode):
+                folders.append(a.filename)
+            elif a.st_mode is not None and stat.S_ISREG(a.st_mode):
+                files[a.filename] = a.st_size or 0
+        return folders, files
+
     def download(self, remote_path: str, local_path: Path,
                  progress: Callable[[int, int], None] | None = None) -> None:
         self.sftp.get(remote_path, str(local_path), callback=progress)
 
     def remove(self, remote_path: str) -> None:
         self.sftp.remove(remote_path)
+
+    def mkdir(self, remote_path: str) -> None:
+        """Make a folder, if it isn't there already."""
+        try:
+            self.sftp.mkdir(remote_path)
+        except OSError:
+            if not self.exists(remote_path):
+                raise
+
+    def rename(self, old_path: str, new_path: str) -> None:
+        self.sftp.posix_rename(old_path, new_path)
 
     def upload(self, fileobj: BinaryIO, remote_path: str,
                progress: Callable[[int, int], None] | None = None) -> None:

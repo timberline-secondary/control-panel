@@ -461,3 +461,23 @@ def test_make_a_title_only_shrine(tmp_path, ffmpeg_path):
                                  no_progress)
     assert [p.name for p in made] == ["ann.lee.a.mp4"] and not problems
     assert _duration(ffmpeg_path, made[0]) == pytest.approx(9, abs=0.1)
+
+
+def test_save_when_adding_keeps_the_other_videos(tmp_path):
+    folder = tmp_path / "ann.lee"
+    folder.mkdir()
+    for name in ["ann.lee.a.mp4", "ann.lee.z.cat.mp4"]:
+        (folder / name).write_bytes(b"old")
+    (tmp_path / "ann.lee.a.mp4").write_bytes(b"new")
+    shrine.save([tmp_path / "ann.lee.a.mp4"], folder, "ann.lee", replace_all=False)
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == {
+        "ann.lee.a.mp4": b"new", "ann.lee.z.cat.mp4": b"old"}
+
+
+def test_new_videos_dont_take_the_names_of_old_ones(tmp_path, ffmpeg_path):
+    frames = [Image.new("RGB", (16, 16), c) for c in ("red", "green")]
+    frames[0].save(tmp_path / "cat.gif", save_all=True, append_images=frames[1:], duration=500)
+    made, _ = shrine.make(ffmpeg_path, "ann.lee", None,
+                          [shrine.Media(tmp_path / "cat.gif", ANIMATION, "cat.gif")],
+                          tmp_path / "work", no_progress, taken={"ann.lee.z.cat.mp4"})
+    assert [p.name for p in made] == ["ann.lee.z.cat-2.mp4"]
