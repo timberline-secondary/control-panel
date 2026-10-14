@@ -228,6 +228,15 @@ def classify(ffmpeg_path: Path, path: Path) -> str:
     raise ShrineError("it isn't a picture or video")
 
 
+def is_animated(path: Path) -> bool:
+    """Whether a picture file is really an animation (a GIF, PNG or WebP that moves)."""
+    try:
+        with Image.open(path) as image:
+            return bool(getattr(image, "is_animated", False))
+    except Exception:  # noqa: BLE001 (not a picture, or a damaged one)
+        return False
+
+
 def gather(ffmpeg_path: Path, source: Path, work_dir: Path, *, depth: int = 0,
            budget: list[int] | None = None) -> tuple[list[Media], list[Skipped]]:
     """Every picture and video in a folder (and its subfolders), a file, or a zip file.

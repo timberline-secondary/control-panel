@@ -1,31 +1,36 @@
-"""Everything the person sees: menus, prompts and coloured messages."""
+"""Everything the person sees: menus, prompts and coloured messages.
+
+They work like the old Linux control panel's:
+
+- a menu is a numbered list: type the number, then press Enter;
+- a question says what q and Enter do: "Grad year ([q]uit | [Enter] = 2027): ";
+- a yes or no question is "Delete it? y/[n] ", the [ ] marking what Enter means.
+
+Every answer needs Enter, and q always goes back (or quits, from the main menu).
+"""
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import Any
 
-import questionary
-from prompt_toolkit.filters import Condition
-from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
-from prompt_toolkit.keys import Keys
+from prompt_toolkit import print_formatted_text
+from prompt_toolkit import prompt as _prompt
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
 from prompt_toolkit.shortcuts import clear as clear_screen
 
-STYLE = questionary.Style([
-    ("qmark", "fg:ansicyan bold"),
-    ("question", "bold"),
-    ("pointer", "fg:ansicyan bold"),
-    ("highlighted", "fg:ansicyan bold"),
-    ("answer", "fg:ansicyan"),
-    ("disabled", "fg:ansibrightblack italic"),
-])
-
-QUIT_HINT = "(q to go back)"
-
-# Every answer is typed and then Enter is pressed (a stray key never answers anything), and
-# q, then Enter, always goes back (or quits, at the main menu).
+# The old control panel's colours.
+HEADER = "fg:ansimagenta"
+SUCCESS = "fg:ansigreen bold"
+WARNING = "fg:ansiyellow"
+ERROR = "fg:ansired bold"
+INPUT = "fg:ansiyellow bold"  # questions
+YES_NO = "fg:ansicyan"
 
 
 def clear() -> None:
@@ -34,7 +39,7 @@ def clear() -> None:
 
 def heading(title: str) -> None:
     line = "#" * 60
-    _print(f"{line}\n#{title.upper().center(58)}#\n{line}\n", style="fg:ansimagenta")
+    _print(f"{line}\n#{title.upper().center(58)}#\n{line}\n", style=HEADER)
 
 
 def info(text: str) -> None:
@@ -42,142 +47,168 @@ def info(text: str) -> None:
 
 
 def success(text: str) -> None:
-    _print(text, style="fg:ansigreen bold")
+    _print(text, style=SUCCESS)
 
 
 def warning(text: str) -> None:
-    _print(text, style="fg:ansiyellow")
+    _print(text, style=WARNING)
 
 
 def error(text: str) -> None:
-    _print(text, style="fg:ansired bold")
+    _print(text, style=ERROR)
 
 
 def _print(text: str, style: str = "") -> None:
     # prompt_toolkit's Windows output needs a real console; fall back when piped or captured.
     if sys.stdout is not None and sys.stdout.isatty():
-        questionary.print(text, style=style)
+        print_formatted_text(FormattedText([(style, text)]))
     else:
         print(text)
 
 
-def ask(prompt: str, default: str = "", *, patch_stdout: bool = False) -> str | None:
-    """Ask for some text. Returns None if they typed q or pressed Ctrl+C."""
-    answer = _answer(questionary.text(prompt, default=default, qmark=">", style=STYLE),
-                     patch_stdout=patch_stdout)
+def _input(text: str, style: str = INPUT, *, password: bool = False,
+           patch_stdout: bool = False) -> str | None:
+    """What they typed (once they press Enter). None for Ctrl+C, or Ctrl+D on an empty line."""
+    try:
+        with _patch_stdout() if patch_stdout else nullcontext():
+            return _prompt(FormattedText([(style, text)]), is_password=password)
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def _hints(*hints: str) -> str:
+    return f"({' | '.join(h for h in hints if h)})"
+
+
+def ask(prompt: str, default: str = "", *, hint: str = "",
+        patch_stdout: bool = False) -> str | None:
+    """Ask for some text: "Prompt ([q]uit | [Enter] = default): ".
+
+    Returns what they typed, or the default if they just press Enter (hint says what Enter
+    means when there's no default, e.g. "[Enter] = done"). None if they type q.
+    """
+    enter = f"[Enter] = {default}" if default else hint
+    answer = _input(f"{prompt} {_hints('[q]uit', enter)}: ", patch_stdout=patch_stdout)
     if answer is None or answer.strip().lower() == "q":
         return None
-    return answer.strip()
+    return answer.strip() or default
 
 
 def ask_password(prompt: str) -> str | None:
-    """None if they typed q or pressed Ctrl+C."""
-    answer = _answer(questionary.password(prompt, qmark=">", style=STYLE,
-                                          instruction=QUIT_HINT))
+    """None if they type q."""
+    answer = _input(f"{prompt} {_hints('[q]uit')}: ", password=True)
     return None if answer is None or answer.strip().lower() == "q" else answer
 
 
-_YES, _NO = {"y", "yes"}, {"n", "no"}
-
-
 def confirm(prompt: str, default: bool = True) -> bool | None:
-    """Yes or no, typed and then Enter (just Enter for the default). None (which also
-    counts as no) if they type q or press Ctrl+C, for when that should mean 'stop' rather
-    than 'no, carry on'."""
-    answer = _answer(questionary.text(
-        prompt, qmark="?", style=STYLE,
-        instruction=f"({'Y/n' if default else 'y/N'}, q to go back)",
-        validate=lambda text: text.strip().lower() in {"", "q", *_YES, *_NO}
-        or "Type y or n, then press Enter (or q to go back).",
-    ))
-    return None if answer is None else _yes_or_no(answer, default)
-
-
-def _yes_or_no(text: str, default: bool) -> bool | None:
-    text = text.strip().lower()
-    if text == "q":
-        return None
-    return default if not text else text in _YES
+    """Yes or no: "Delete it? y/[n] ". None (which also counts as no) if they type q, for
+    when that should mean 'stop' rather than 'no, carry on'."""
+    while True:
+        answer = _input(f"{prompt} {'[y]/n' if default else 'y/[n]'} ", style=YES_NO)
+        if answer is None:
+            return None
+        answer = answer.strip().lower()
+        if answer == "q":
+            return None
+        if not answer:
+            return default
+        if answer in ("y", "yes", "n", "no"):
+            return answer.startswith("y")
+        error("Type y or n, then press Enter (or q to go back).")
 
 
 def pause(prompt: str = "Press Enter to carry on.") -> None:
     """Wait for Enter, e.g. so a message can be read before the screen is cleared."""
-    try:
-        input(prompt)
-    except (EOFError, KeyboardInterrupt):
-        pass
+    _input(prompt, style="")
 
 
 BACK = object()  # value of a menu's "Back"/"Quit" choice
 
 
-def choose(prompt: str, choices: list[questionary.Choice | str]) -> Any:
-    """Arrow keys or numbers to point at one, then Enter. q is the key for Back (or Quit),
-    which every menu has. Returns None for Back or Ctrl+C."""
-    choices = [_back_on_q(c) for c in choices]
-    back = next((c for c in choices if isinstance(c, questionary.Choice) and c.value is BACK),
-                None)
-    if back is None:
-        back = questionary.Choice("Back", value=BACK, shortcut_key="q")
-        choices.append(back)
-    leave = "quit" if str(back.title).lower().startswith("quit") else "go back"
-    answer = _answer(questionary.select(
-        prompt, choices=choices, qmark="?", style=STYLE, use_shortcuts=True,
-        instruction=f"(arrow keys or numbers, then Enter; q to {leave})",
-    ))
-    return None if answer is BACK else answer
+@dataclass
+class Choice:
+    title: str
+    value: Any = None
+    disabled: str | None = None  # why it can't be chosen, if it can't
+    checked: bool = False  # ticked to start with, in choose_many
 
 
-def _back_on_q(item: questionary.Choice | str) -> questionary.Choice | str:
-    if isinstance(item, questionary.Choice) and item.value is BACK:
-        return questionary.Choice(item.title, value=BACK, disabled=item.disabled,
-                                  shortcut_key="q")
-    return item
+def choice(title: str, value: Any = None, disabled: str | None = None,
+           checked: bool = False) -> Choice:
+    return Choice(title, value, disabled, checked)
 
 
-def choose_many(prompt: str, choices: list[questionary.Choice], *,
+def _back_label(title: str) -> str:
+    return "[q]uit" if title.strip().lower() == "quit" else f"[q] {title}"
+
+
+def choose(prompt: str, choices: list[Choice | str]) -> Any:
+    """A numbered menu: type a number, then Enter (just Enter for the first). q is Back (or
+    Quit), which every menu has. Returns the chosen value, or None for Back."""
+    items = [c if isinstance(c, Choice) else Choice(c, c) for c in choices]
+    back = next((c for c in items if c.value is BACK), Choice("Back", BACK))
+    options = [c for c in items if c is not back]
+    _print(prompt, style="bold")
+    number = 0
+    numbered: dict[int, Choice] = {}
+    for item in options:
+        if item.disabled:
+            _print(f"      {item.title} ({item.disabled})", style="fg:ansibrightblack")
+        else:
+            number += 1
+            numbered[number] = item
+            _print(f"  {number}. {item.title}")
+    _print(f"  {_back_label(back.title)}")
+    while True:
+        answer = _input("Choose an item ([Enter] = 1): " if numbered else "Choose an item: ")
+        if answer is None or answer.strip().lower() in ("q", "b"):
+            return None
+        answer = answer.strip()
+        if not answer and numbered:
+            return numbered[1].value
+        if answer.isdigit() and int(answer) in numbered:
+            return numbered[int(answer)].value
+        error(f"That isn't one of the choices. Type its number (1 to {len(numbered)}), then "
+              "press Enter." if numbered else "There's nothing to choose. Type q to go back.")
+
+
+def choose_many(prompt: str, choices: list[Choice], *,
                 require_one: bool = False) -> list[Any] | None:
-    """Tick boxes, then Enter. Returns the ticked values, or None for q (then Enter) or
-    Ctrl+C."""
-    question = questionary.checkbox(
-        prompt, choices=choices, qmark="?", style=STYLE,
-        instruction="(space to tick or untick, then Enter; q then Enter to go back)",
-        validate=(lambda ticked: bool(ticked) or "Tick at least one.") if require_one
-        else lambda ticked: True,
-    )
-    _back_on_q_then_enter(question)
-    return _answer(question)
+    """A numbered list to pick some from: type their numbers (e.g. 1 3, 2-5, or all), then
+    Enter (just Enter for the ones marked [x]). Returns their values, or None for q."""
+    _print(prompt, style="bold")
+    for number, item in enumerate(choices, start=1):
+        _print(f"  {number}. [{'x' if item.checked else ' '}] {item.title}")
+    ticked = [number for number, item in enumerate(choices, start=1) if item.checked]
+    enter = f"[Enter] = {' '.join(map(str, ticked))}" if ticked else \
+        ("" if require_one else "[Enter] = none")
+    while True:
+        answer = _input(f"Type their numbers, e.g. 1 3, or all {_hints('[q]uit', enter)}: ")
+        if answer is None or answer.strip().lower() == "q":
+            return None
+        numbers = _numbers(answer, len(choices)) if answer.strip() else ticked
+        if numbers is None:
+            error(f"Type numbers from 1 to {len(choices)}, e.g. 1 3 or 2-4, then press Enter.")
+        elif require_one and not numbers:
+            error("Pick at least one.")
+        else:
+            return [choices[n - 1].value for n in numbers]
 
 
-def _back_on_q_then_enter(question: questionary.Question) -> None:
-    """In a tick-box list: q, then Enter, goes back (answers None). Any other key in
-    between (space, the arrows...) means they didn't mean it."""
-    armed = False
-    original = question.application.key_bindings
-    extra = KeyBindings()
-
-    def disarming(handler: Callable) -> Callable:
-        def handle(event: Any) -> Any:
-            nonlocal armed
-            armed = False
-            return handler(event)
-        return handle
-
-    for binding in original.bindings:
-        if binding.keys not in (("q",), (Keys.ControlM,), (Keys.ControlC,), (Keys.Any,)):
-            extra.add(*binding.keys, filter=binding.filter, eager=binding.eager)(
-                disarming(binding.handler))
-
-    @extra.add("q", eager=True)
-    def _(event: Any) -> None:
-        nonlocal armed
-        armed = True
-
-    @extra.add(Keys.ControlM, eager=True, filter=Condition(lambda: armed))
-    def _(event: Any) -> None:
-        event.app.exit(result=None)
-
-    question.application.key_bindings = merge_key_bindings([original, extra])
+def _numbers(text: str, count: int) -> list[int] | None:
+    """'1 3, 5-7' -> [1, 3, 5, 6, 7]; 'all' -> all of them. None if it doesn't make sense."""
+    if text.strip().lower() in ("all", "a"):
+        return list(range(1, count + 1))
+    picked: list[int] = []
+    for part in re.split(r"[\s,]+", text.strip()):
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if not match:
+            return None
+        start, end = int(match[1]), int(match[2] or match[1])
+        if not 1 <= start <= end <= count:
+            return None
+        picked += [n for n in range(start, end + 1) if n not in picked]
+    return sorted(picked)
 
 
 @contextmanager
@@ -207,16 +238,3 @@ def progress(label: str) -> Iterator[Callable[[float], None]]:
             sys.stdout.write("\n")
         else:
             print(f"  {label}: {'done' if shown == 100 else 'stopped'}")
-
-
-def _answer(question: questionary.Question, patch_stdout: bool = False) -> Any:
-    """None if they press Ctrl+C, or Ctrl+D on an empty line (which raises EOFError)."""
-    try:
-        return question.ask(patch_stdout=patch_stdout, kbi_msg="")
-    except EOFError:
-        return None
-
-
-def choice(title: str, value: Any = None, disabled: str | None = None,
-           checked: bool = False) -> questionary.Choice:
-    return questionary.Choice(title, value=value, disabled=disabled, checked=checked)

@@ -396,6 +396,15 @@ class ArtServer:
                 progress(i / len(paths))
         return got
 
+    def fetch(self, path: str, folder: Path) -> Path:
+        """Copy one file here to look at, under a name that's safe on Windows."""
+        folder.mkdir(parents=True, exist_ok=True)
+        stem, ext = posixpath.splitext(posixpath.basename(path))
+        safe = re.sub(r"[^A-Za-z0-9 ._-]", "_", stem)[:80].strip(" .") or "art"
+        local = folder / f"{len(list(folder.iterdir())) + 1:02d}-{safe}{_extension(ext)}"
+        self.connection.download(path, local)
+        return local
+
     def set_aside(self, path: str, label: str) -> str:
         """Move a folder or file into .replaced, rather than deleting anyone's art."""
         aside = posixpath.join(self.root, REPLACED)

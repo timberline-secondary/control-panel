@@ -13,6 +13,7 @@ import os
 import posixpath
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -458,14 +459,20 @@ def _documents() -> Path:
 
 
 def open_folder(folder: Path) -> None:
+    """Open it in File Explorer."""
+    open_file(folder, "the folder")
+
+
+def open_file(path: Path, what: str = "it") -> None:
+    """Open a file in the app Windows uses for it (e.g. Photos), or a folder in Explorer."""
     try:
         if sys.platform == "win32":
-            os.startfile(folder)  # opens it in File Explorer
+            os.startfile(path)
         else:
-            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)],
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as e:
-        ui.error(f"Couldn't open the folder: {e}")
+        ui.error(f"Couldn't open {what}: {e}")
 
 
 def videos_in(folder: Path) -> list[Path]:
@@ -603,7 +610,7 @@ def _say_unreadable(server: ArtServer) -> None:
 
 def _choose_art(server: ArtServer) -> ArtFolder | None:
     while True:
-        text = ui.ask(f"Whose shrine? Type their username, or part of it {ui.QUIT_HINT}")
+        text = ui.ask("Whose shrine? Type their username, or part of it")
         if text is None:
             return None
         text = text.strip()
@@ -681,18 +688,8 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
         old_files = [p for p in existing if p not in replaced]
         slides: list[tuple[shrine.Media, str]] = []
         if remake:  # the slideshow is made again, from all the pictures
-            old_pictures = [p for p in old_files if is_picture(p)]
-            with on_pi_files(server), ui.progress("Getting its pictures from pi-files") as update:
-                got = server.download(old_pictures, work / "kept", update)
-            for path, remote in zip(got, old_pictures, strict=True):
-                file_name = posixpath.basename(remote)
-                try:
-                    kind = shrine.classify(ffmpeg_path, path)
-                except shrine.ShrineError as e:
-                    ui.warning(f"Left out {file_name}: {e}")
-                    continue
-                if kind == shrine.PICTURE:  # an animation's video is on the TVs already
-                    slides.append((shrine.Media(path, kind, file_name), file_name))
+            slides = _old_slides(ffmpeg_path, server,
+                                 [p for p in old_files if is_picture(p)], work)
             slides += new_pictures
             if card:
                 slides.append((shrine.Media(card, shrine.PICTURE, card.name), card.name))
@@ -844,6 +841,184 @@ def _plan_new_art(server: ArtServer, target: ArtFolder, existing: dict[str, int]
     return planned
 
 
+def view_art(settings: TvsSettings) -> None:
+    """Look at a shrine's art on pi-files one piece at a time, and delete pieces, as the old
+    control panel's "view or remove media" did."""
+    with art_server(settings) as server:
+        if server is None:
+            ui.error("This needs pi-files, where each shrine's art is kept. (The README says "
+                     "how to set it up.)")
+            return
+        with on_pi_files(server):
+            target = _choose_art(server)
+        if target is not None:
+            _view(settings, server, target)
+
+
+def _view(settings: TvsSettings, server: ArtServer, target: ArtFolder) -> None:
+    name = target.name
+    deleted: list[str] = []  # the names on the TVs of what's gone, since the slideshow was made
+    changed = False  # a picture (or the title card) went, so the slideshow needs making again
+    viewing = Path(tempfile.mkdtemp(prefix="shrine-art-"))
+    try:
+        while True:
+            with on_pi_files(server):
+                existing = server.art_files(target)
+            _say_unreadable(server)
+            if not existing:
+                ui.info(f"{target.path} on pi-files has no art left.")
+                break
+            path = ui.choose(f"{target.folder}'s art on pi-files (TV {target.tv}). Which piece "
+                             "do you want to see?", [
+                                 *(ui.choice(_describe(p, size, target), p)
+                                   for p, size in _viewing_order(existing, name)),
+                                 ui.choice("Back", ui.BACK)])
+            if path is None:
+                break
+            file_name = posixpath.basename(path)
+            with on_pi_files(server):
+                local = server.fetch(path, viewing)
+            open_file(local)
+            if not ui.confirm(f"Delete {file_name}? Hopefully it opened for you. (It's moved to "
+                              f"{server.root}/{REPLACED}, so it can be put back.)",
+                              default=False):
+                continue
+            moving = is_picture(path) and not shrine.is_animated(local)
+            tv_names = set() if moving else _tv_names(name, path, list(existing))
+            label = file_name if file_name.lower().startswith(f"{name}.") \
+                else f"{target.folder}-{file_name}"
+            with on_pi_files(server):
+                server.set_aside(path, label)
+            ui.success(f"Deleted {file_name} from {target.folder}'s art.")
+            deleted += sorted(tv_names)
+            changed = changed or moving
+            if ui.confirm(f"Make {name}'s slideshow again without it, and put it on the TVs?",
+                          default=True):
+                if _after_deleting(settings, server, target, changed, set(deleted)):
+                    deleted, changed = [], False
+        if deleted or changed:
+            if ui.confirm(f"Some of {name}'s art was deleted. Make the slideshow again, and put it "
+                          "on the TVs?", default=True) and \
+                    _after_deleting(settings, server, target, changed, set(deleted)):
+                return
+            ui.warning(f"Don't forget: the TVs still show the deleted art. To fix it, use 'Add "
+                       f"art to a shrine' for {name} and press Enter without adding any.")
+    finally:
+        shutil.rmtree(viewing, ignore_errors=True)  # whatever a viewer isn't holding open
+
+
+def _viewing_order(existing: dict[str, int], name: str) -> list[tuple[str, int]]:
+    """The title card and pictures in the order the slideshow shows them, then the rest."""
+    pictures = order([p for p in existing if is_picture(p)], name)
+    others = sorted((p for p in existing if not is_picture(p)),
+                    key=lambda p: shrine.natural_key(piece(p, name)))
+    return [(p, existing[p]) for p in pictures + others]
+
+
+def _describe(path: str, size: int, target: ArtFolder) -> str:
+    file_name = posixpath.basename(path)
+    if is_title_card(path):
+        kind = "the title card"
+    elif is_picture(path):
+        kind = "picture"
+    else:
+        kind = "video" if posixpath.dirname(path) == target.path else \
+            "video, loose in the TV's folder"
+    return f"{file_name} ({kind}, {size_text(size)})"
+
+
+def _tv_names(name: str, path: str, paths: list[str]) -> set[str]:
+    """The names a piece's video may have on the TVs: as this app names it (worked out the
+    way _video_names does), as hightower had it, and as the old Windows control panel did."""
+    taken: set[str] = set()
+    named = {p: shrine.video_file_name(name, piece(p, name), taken)
+             for p in order([p for p in paths if not is_title_card(p)], name)}
+    base = posixpath.basename(path)
+    return {n for n in (named.get(path), base, f"{base}.mp4")
+            if n and n.lower().startswith(f"{name}.z.") and n.lower().endswith(".mp4")}
+
+
+def _after_deleting(settings: TvsSettings, server: ArtServer, target: ArtFolder,
+                    remake: bool, gone: set[str]) -> bool:
+    """Make the slideshow again from the art that's left (if a picture went), take the
+    deleted videos off the TVs, and put the new slideshow on them. Returns whether it did."""
+    name = target.name
+    folder = shrines_folder(settings) / name
+    slideshow = None
+    if not remake and not gone:
+        ui.info("Nothing on the TVs needs changing.")
+        return True
+    if remake:
+        ffmpeg_path = _get_ffmpeg(settings)
+        if ffmpeg_path is None:
+            return False
+        with on_pi_files(server):
+            existing = server.art_files(target)
+        with tempfile.TemporaryDirectory(prefix="shrine-") as work:
+            work = Path(work)
+            pictures = order([p for p in existing if is_picture(p)], name)
+            slides = _old_slides(ffmpeg_path, server, pictures, work)
+            if slides:
+                made, problems = shrine.make(ffmpeg_path, name, None,
+                                             [item for item, _ in slides], work / "made",
+                                             ui.progress)
+                for problem in problems:
+                    ui.warning(f"Left out {problem.label}: {problem.reason}")
+                if not made:
+                    ui.error("The slideshow couldn't be made.")
+                    return False
+                if _save_locally(made, folder, name, replace_all=False) is None:
+                    return False
+                slideshow = folder / f"{name}.a.mp4"
+            else:
+                ui.info(f"{name} has no pictures left, so its slideshow comes off the TVs.")
+                gone = gone | {f"{name}.a.mp4"}
+    for file_name in gone:  # so 'Put a shrine on the TVs' doesn't bring them back
+        with contextlib.suppress(OSError):
+            (folder / file_name).unlink(missing_ok=True)
+    numbers = ui.choose_many("Which TVs should it be changed on?", [
+        ui.choice(label, number, checked=number in {target.tv, HALLWAY})
+        for number, label in TVS.items()], require_one=True)
+    if not numbers:
+        return False
+    with connected(settings, numbers) as tvs:
+        for tv in tvs.values():
+            try:
+                taken_off = [f for f in tv.videos() if f in gone]
+                for file_name in taken_off:
+                    tv.remove(file_name)
+                if taken_off:
+                    ui.success(f"{tv.name}: took off {', '.join(taken_off)}.")
+                if slideshow is not None:
+                    _push_to(tv, {slideshow: slideshow.name}, name, adding=True)  # restarts it
+                elif taken_off:
+                    refresh(tv)
+                else:
+                    ui.info(f"{tv.name}: nothing to change.")
+            except (TvError, OSError, paramiko.SSHException) as e:
+                ui.error(f"{tv.name}: that didn't work ({e}).")
+    return True
+
+
+def _old_slides(ffmpeg_path: Path, server: ArtServer, pictures: list[str],
+                work: Path) -> list[tuple[shrine.Media, str]]:
+    """Get a shrine's pictures from pi-files for its slideshow: [(picture, its name there)].
+    Animations are left out (their videos are on the TVs already)."""
+    with on_pi_files(server), ui.progress("Getting its pictures from pi-files") as update:
+        got = server.download(pictures, work / "kept", update)
+    slides = []
+    for path, remote in zip(got, pictures, strict=True):
+        file_name = posixpath.basename(remote)
+        try:
+            kind = shrine.classify(ffmpeg_path, path)
+        except shrine.ShrineError as e:
+            ui.warning(f"Left out {file_name}: {e}")
+            continue
+        if kind == shrine.PICTURE:
+            slides.append((shrine.Media(path, kind, file_name), file_name))
+    return slides
+
+
 def _get_ffmpeg(settings: TvsSettings) -> Path | None:
     found = ffmpeg.find(settings.ffmpeg)
     if found:
@@ -867,7 +1042,7 @@ SUBJECT_CHOICES = [ui.choice(subject, subject) for subject in shrine.SUBJECTS]
 
 def _ask_username() -> tuple[str, None] | None:
     while True:
-        username = ui.ask(f"The student's username, e.g. firstname.lastname {ui.QUIT_HINT}")
+        username = ui.ask("The student's username, e.g. firstname.lastname")
         if username is None:
             return None
         name = shrine.clean_name(username, space=".")
@@ -881,7 +1056,7 @@ def _ask_username() -> tuple[str, None] | None:
 
 def _ask_collection_name() -> tuple[str, str] | None:
     while True:
-        text = ui.ask(f"Name of the collection, e.g. Skills Canada 2026 {ui.QUIT_HINT}")
+        text = ui.ask("Name of the collection, e.g. Skills Canada 2026")
         if text is None:
             return None
         name = shrine.clean_name(text, space="-").replace(".", "-")
@@ -898,7 +1073,7 @@ def _ask_title(name: str, text: str | None) -> tuple[shrine.Title | None] | None
     if not is_student(name):
         return _ask_collection_title(text or name)
     default_name = shrine.display_name(name)
-    shown = ui.ask(f"Their name on the title card (Enter for {default_name}, q to go back)")
+    shown = ui.ask("Their name on the title card", default=default_name)
     if shown is None:
         return None
     grad = _ask_grad_year()
@@ -909,7 +1084,7 @@ def _ask_title(name: str, text: str | None) -> tuple[shrine.Title | None] | None
         ui.choice("Back", ui.BACK),
     ])
     if subject == "other":
-        subject = ui.ask(f"The subject, as in 'The ___ of {shown or default_name}' {ui.QUIT_HINT}")
+        subject = ui.ask(f"The subject, as in 'The ___ of {shown or default_name}'")
     if not subject:
         return None
     return (shrine.Title(shown or default_name, subject, grad),)
@@ -918,7 +1093,7 @@ def _ask_title(name: str, text: str | None) -> tuple[shrine.Title | None] | None
 def _ask_grad_year() -> str | None:
     default = str(shrine.this_years_grads())
     while True:
-        year = ui.ask(f"Grad year (Enter for {default}, q to go back)")
+        year = ui.ask("Grad year", default=default)
         if year is None:
             return None
         year = year or default
@@ -939,7 +1114,7 @@ def _ask_collection_title(text: str) -> tuple[shrine.Title | None] | None:
     if choice == "none":
         return (None,)
     if choice == "other":
-        text = ui.ask(f"Title {ui.QUIT_HINT}")
+        text = ui.ask("Title")
         if not text:
             return None
     return (shrine.Title(text),)
@@ -965,8 +1140,8 @@ def _ask_for_media(ffmpeg_path: Path, work: Path) -> list[shrine.Media] | None:
     seen: set[Path] = set()
     downloads = work / "downloads"
     while True:
-        hint = "Enter when done" if media else "q to go back"
-        answer = ui.ask(f"Drag in a folder or files, or paste a link ({hint})")
+        answer = ui.ask("Drag in a folder or files, or paste a link",
+                        hint="[Enter] = done" if media else "")
         if answer is None:
             return None
         if not answer:
@@ -1140,7 +1315,7 @@ def _choose_shrine_folder(settings: TvsSettings) -> Path | None:
         folders = sorted((d for d in base.iterdir() if d.is_dir() and videos_in(d)),
                          key=lambda d: d.stat().st_mtime, reverse=True)
     if len(folders) > MAX_LISTED:
-        text = ui.ask("Whose shrine? Type part of the name (or press Enter for the newest ones)")
+        text = ui.ask("Whose shrine? Type part of the name", hint="[Enter] = the newest ones")
         if text is None:
             return None
         folders = [d for d in folders if text.casefold() in d.name.casefold()]
@@ -1154,7 +1329,7 @@ def _choose_shrine_folder(settings: TvsSettings) -> Path | None:
     if picked != "other":
         return picked
     while True:
-        answer = ui.ask(f"Drag the folder with the videos into this window {ui.QUIT_HINT}")
+        answer = ui.ask("Drag the folder with the videos into this window")
         if answer is None:
             return None
         folder = Path(clean_source(answer)).expanduser()
@@ -1217,7 +1392,7 @@ def _list(videos: dict[str, int]) -> None:
     names = sorted(videos, key=shrine.natural_key)
     for file_name in names:
         ui.info(f"  {file_name} ({size_text(videos[file_name])})")
-    while text := ui.ask("Search for videos containing (or just press Enter to go back)"):
+    while text := ui.ask("Search for videos containing", hint="[Enter] = done"):
         matches = [n for n in names if text.casefold() in n.casefold()]
         if not matches:
             ui.warning(f"No videos have '{text}' in their name.")
@@ -1226,8 +1401,8 @@ def _list(videos: dict[str, int]) -> None:
 
 
 def _pick(videos: dict[str, int], verb: str) -> list[str]:
-    text = ui.ask("Which videos? Type part of their name, e.g. a username (or press Enter "
-                  "for all, q to go back)")
+    text = ui.ask("Which videos? Type part of their name, e.g. a username",
+                  hint="[Enter] = all")
     if text is None:
         return []
     names = [n for n in sorted(videos, key=shrine.natural_key) if text.casefold() in n.casefold()]
@@ -1315,6 +1490,7 @@ def restart(settings: TvsSettings) -> None:
 ACTIONS = [
     ("Make a shrine (a student's art, or a collection)", make_shrine),
     ("Add art to a shrine", add_art),
+    ("See, open or delete a shrine's art", view_art),
     ("Put a shrine on the TVs", push_shrine),
     ("See, copy or delete the videos on a TV", manage_videos),
     ("Turn TVs on or off", power),

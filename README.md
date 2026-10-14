@@ -20,9 +20,12 @@ yes and it downloads the new version, swaps it in and restarts. (You can also ru
 
 ## Using it
 
-Pick a panel with the arrow keys (or its number) and press Enter. Every answer needs Enter
-(for yes or no, type `y` or `n`, or just press Enter for the default), and `q` then Enter
-always goes back, or quits from the main menu. The first time you
+It works like the old Linux control panel. Every menu is a numbered list: type the number and
+press Enter (just Enter picks 1). Questions say what Enter and `q` do, like
+`Grad year ([q]uit | [Enter] = 2027):`, and yes-or-no questions are `[y]/n` or `y/[n]`, the
+`[ ]` marking what Enter means. Where you can pick several (e.g. which TVs), type their numbers,
+like `1 4` or `2-3` or `all`. Every answer needs Enter, and `q` always goes back, or quits from
+the main menu. The first time you
 connect to a Pi you'll be asked for its password. If you're on your own Windows login (not a
 shared one), you can have Windows remember it in Credential Manager.
 
@@ -66,6 +69,7 @@ videos made on your computer:
 | --- | --- |
 | Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). Pictures are shown in the order of their names, and subfolders are included. The student's own files are never moved or changed. The videos are saved in `Documents\Hackerspace shrines\<name>`, and the original art and title card are kept on pi-files (below). If pi-files already has art for them, you can add to it or start over. |
 | Add art to a shrine | Like the old Linux control panel: type part of the student's username, then drag in or paste their new art. It's copied to their folder on pi-files, and their slideshow is made again from all the pictures there. Only the new slideshow and new videos are copied to the TVs (their TV, plus the hallway). Art that's already there is skipped, so you can drag in their whole folder again; if some pieces have the same names as old ones (hightower saved some pictures again), it asks whether to replace them, leave them out or keep both. If they have no title card yet, it offers to make one. If nothing new is added, it offers to make the slideshow again from what's on pi-files. |
+| See, open or delete a shrine's art | Like the old control panel's "view or remove media": pick a student or collection, and their art on pi-files is listed (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player). Then you can delete it: it's moved to `/mnt/ssd/.replaced`, so it can be put back. Every delete is followed by an offer to make the slideshow again without it and put it on the TVs (a deleted video is taken off the TVs instead). |
 | Put a shrine on the TVs | Suggests the TV from the student's last name, plus the hallway. Shows what that student already has on each TV and asks whether to replace it. Checks there's room, copies the videos, then restarts the slideshow so it plays them. |
 | See, copy or delete the videos on a TV | List and search a TV's videos, copy some to this computer, or delete some. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |
