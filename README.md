@@ -20,7 +20,9 @@ yes and it downloads the new version, swaps it in and restarts. (You can also ru
 
 ## Using it
 
-Pick a panel with the arrow keys (or its number) and press Enter. The first time you
+Pick a panel with the arrow keys (or its number) and press Enter. Every answer needs Enter
+(for yes or no, type `y` or `n`, or just press Enter for the default), and `q` then Enter
+always goes back, or quits from the main menu. The first time you
 connect to a Pi you'll be asked for its password. If you're on your own Windows login (not a
 shared one), you can have Windows remember it in Credential Manager.
 
