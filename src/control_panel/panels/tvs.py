@@ -8,7 +8,9 @@ shrine.py), copies them to the TVs, and turns the TVs on and off.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime
+import ipaddress
 import json
 import os
 import posixpath
@@ -227,6 +229,30 @@ def _reach_problem(host: str, port: int) -> str | None:
     return None
 
 
+def _host_names(host: str) -> list[str]:
+    """The names a Pi may be found by: host, then (as Windows finds it with 'ssh pi-files',
+    asking the computers nearby rather than the school's DNS) its short name and
+    name.local. Just host if it's an IP address."""
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    short = host.split(".", 1)[0]
+    return list(dict.fromkeys([host, short, f"{short}.local"]))
+
+
+def _find_host(host: str, port: int) -> str:
+    """The first of _host_names(host) that can be found on the network (host if none)."""
+    for name in _host_names(host):
+        try:
+            socket.getaddrinfo(name, port, type=socket.SOCK_STREAM)
+        except (socket.gaierror, UnicodeError):
+            continue
+        return name
+    return host
+
+
 def _check_reachable(settings: TvsSettings, numbers) -> dict[int, str]:
     """{TV number: what's wrong} for the TVs that can't be reached. Checks them all at once,
     so a TV that's turned off doesn't hold up the others."""
@@ -294,8 +320,14 @@ def refresh(tv: TvPi) -> None:
 def art_server(settings: TvsSettings):
     """Log in to pi-files. Gives an ArtServer, or None (having said why) if it can't be used."""
     connection = None
-    problem = _reach_problem(settings.art_host, settings.port)
+    host = _find_host(settings.art_host, settings.port)
+    if host != settings.art_host:
+        settings = dataclasses.replace(settings, art_host=host)
+    problem = _reach_problem(host, settings.port)
     if problem:
+        others = _host_names(host)[1:]
+        if others and "couldn't find" in problem:
+            problem = problem.rstrip(".") + f", or as {' or '.join(others)}."
         ui.warning(f"pi-files: {problem}")
     else:
         try:
@@ -728,7 +760,8 @@ def _add_to(settings: TvsSettings, ffmpeg_path: Path, server: ArtServer,
             for old in olds:
                 if item.kind == shrine.PICTURE and not is_picture(old):
                     ui.warning(f"The video of {posixpath.basename(old)} stays on the TVs; "
-                               "delete it there with 'See, copy or delete the videos on a TV'.")
+                               "delete it there with 'See, copy or delete the videos playing "
+                               "on a TV'.")
         # Copy the new art to pi-files under hidden names; it's only put in place, with the
         # art it replaces moved aside, once it's all there and the videos are saved.
         files = ([(card, card.name)] if card else []) + [(item.path, f) for item, f, _ in keep]
@@ -974,7 +1007,7 @@ def _delete(server: ArtServer, target: ArtFolder, path: str, existing: dict[str,
             ui.warning(f"Couldn't note on pi-files that its video is gone: {e}")
     if not sure:
         ui.warning(f"Not sure which video on the TVs is {file_name}'s, so it's left on them. "
-                   "Delete it there with 'See, copy or delete the videos on a TV'.")
+                   "Delete it there with 'See, copy or delete the videos playing on a TV'.")
     return sure
 
 
@@ -999,7 +1032,7 @@ def _remind(name: str, changed: bool, deleted: list[str]) -> None:
     ui.warning("Don't forget: the TVs still show the deleted art.")
     if deleted:
         ui.warning(f"  To take {_videos_of(deleted)} off them, use 'See, copy or delete the "
-                   "videos on a TV'.")
+                   "videos playing on a TV'.")
     if changed:
         ui.warning(f"  To make the slideshow again without it, use 'Add art to a shrine' for "
                    f"{name}, press Enter without adding any, then type y.")
@@ -1634,9 +1667,9 @@ def restart(settings: TvsSettings) -> None:
 ACTIONS = [
     ("Make a shrine (a student's art, or a collection)", make_shrine),
     ("Add art to a shrine", add_art),
-    ("See, open or delete a shrine's art", view_art),
+    ("See, open or delete a shrine's original art (on pi-files)", view_art),
     ("Put a shrine on the TVs", push_shrine),
-    ("See, copy or delete the videos on a TV", manage_videos),
+    ("See, copy or delete the videos playing on a TV", manage_videos),
     ("Turn TVs on or off", power),
     ("Restart a TV's slideshow, or reboot it", restart),
 ]
