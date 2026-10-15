@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import posixpath
+import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -823,8 +824,50 @@ def test_collection_names_never_have_dots(monkeypatch):
     assert tvs._ask_title("st-patricks-day-2026", "St. Patrick's Day 2026") == (None,)
 
 
+def test_host_names_to_try():
+    assert tvs._host_names("pi-files.hackerspace.tbl") == [
+        "pi-files.hackerspace.tbl", "pi-files", "pi-files.local"]
+    assert tvs._host_names("pi-files") == ["pi-files", "pi-files.local"]
+    assert tvs._host_names("10.0.0.5") == ["10.0.0.5"]
+    assert tvs._host_names("fe80::1") == ["fe80::1"]
+
+
+def test_pi_files_is_found_by_its_short_name_too(monkeypatch):
+    # The school's DNS doesn't know pi-files.hackerspace.tbl, but 'ssh pi-files' works.
+    def getaddrinfo(name, port, **kwargs):
+        if name != "pi-files":
+            raise socket.gaierror("not found")
+        return [("address",)]
+
+    monkeypatch.setattr(tvs.socket, "getaddrinfo", getaddrinfo)
+    reached, logged_in = [], []
+    monkeypatch.setattr(tvs, "_reach_problem", lambda host, port: reached.append(host))
+    monkeypatch.setattr(tvs.login, "connect", lambda settings: logged_in.append(settings.host))
+    Screen(monkeypatch)
+    with tvs.art_server(TvsSettings()) as server:
+        assert server is None  # (not logged in)
+    assert reached == ["pi-files"] and logged_in == ["pi-files"]
+
+
+def test_pi_files_not_found_says_what_was_tried(monkeypatch):
+    def getaddrinfo(name, port, **kwargs):
+        raise socket.gaierror("not found")
+
+    def create_connection(address, timeout):
+        raise socket.gaierror("not found")
+
+    monkeypatch.setattr(tvs.socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(tvs.socket, "create_connection", create_connection)
+    screen = Screen(monkeypatch)
+    with tvs.art_server(TvsSettings()) as server:
+        assert server is None
+    assert "couldn't find pi-files.hackerspace.tbl on the network, or as pi-files or " \
+        "pi-files.local." in screen.shown("warning")
+
+
 def test_pi_files_that_cant_be_used_is_explained(monkeypatch):
     screen = Screen(monkeypatch)
+    monkeypatch.setattr(tvs, "_find_host", lambda host, port: host)
     monkeypatch.setattr(tvs, "_reach_problem", lambda host, port: "couldn't reach it.")
     with tvs.art_server(TvsSettings()) as server:
         assert server is None
@@ -1545,7 +1588,7 @@ def test_the_reminder_stays_if_a_tv_isnt_changed(tmp_path, monkeypatch, pi_files
         "Before you go: Take the video of ann.lee.z.clip.mov off the TVs?"
     assert "Don't forget" in screen.shown("warning")
     assert "To take the video of ann.lee.z.clip.mov off them, use 'See, copy or delete the " \
-        "videos on a TV'" in screen.shown("warning")
+        "videos playing on a TV'" in screen.shown("warning")
     assert "Add art" not in screen.shown("warning")  # that wouldn't take it off
 
 

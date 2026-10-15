@@ -69,9 +69,9 @@ videos made on your computer:
 | --- | --- |
 | Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). Pictures are shown in the order of their names, and subfolders are included. The student's own files are never moved or changed. The videos are saved in `Documents\Hackerspace shrines\<name>`, and the original art and title card are kept on pi-files (below). If pi-files already has art for them, you can add to it or start over. |
 | Add art to a shrine | Like the old Linux control panel: type part of the student's username, then drag in or paste their new art. It's copied to their folder on pi-files, and their slideshow is made again from all the pictures there. Only the new slideshow and new videos are copied to the TVs (their TV, plus the hallway). Art that's already there is skipped, so you can drag in their whole folder again; if some pieces have the same names as old ones (hightower saved some pictures again), it asks whether to replace them, leave them out or keep both. If they have no title card yet, it offers to make one. If nothing new is added, it offers to make the slideshow again from what's on pi-files. |
-| See, open or delete a shrine's art | Like the old control panel's "view or remove media": pick a student or collection, and their art on pi-files is listed (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player). Then you can delete it: it's moved to `/mnt/ssd/.replaced`, so it can be put back. Every delete is followed by an offer to make the slideshow again without it and put it on the TVs (for a deleted video, an offer to take it off the TVs instead). |
+| See, open or delete a shrine's original art (on pi-files) | Like the old control panel's "view or remove media": pick a student or collection, and their art on pi-files is listed (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player). Then you can delete it: it's moved to `/mnt/ssd/.replaced`, so it can be put back. Every delete is followed by an offer to make the slideshow again without it and put it on the TVs (for a deleted video, an offer to take it off the TVs instead). |
 | Put a shrine on the TVs | Suggests the TV from the student's last name, plus the hallway. Shows what that student already has on each TV and asks whether to replace it. Checks there's room, copies the videos, then restarts the slideshow so it plays them. |
-| See, copy or delete the videos on a TV | List and search a TV's videos, copy some to this computer, or delete some. |
+| See, copy or delete the videos playing on a TV | List and search a TV's videos, copy some to this computer, or delete some. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |
 | Restart a TV's slideshow, or reboot it | Restarting the slideshow is quick and picks up new or deleted videos. |
 
@@ -149,6 +149,7 @@ media_dir = "/home/pi/rs_media"     # the folder Raspberry Slideshow plays
 shrines_dir = ""                    # where shrines are saved; empty means Documents\Hackerspace shrines
 ffmpeg = ""                         # an ffmpeg.exe to use; empty means download it when needed
 art_host = "pi-files.hackerspace.tbl"  # the Pi that keeps the shrines' art (same login as the TVs)
+# (if that name isn't found, its short name, e.g. pi-files, and pi-files.local are tried)
 art_dir = "/mnt/ssd"                # its external drive, with a folder for each TV (tv1 to tv4)
 ```
 
