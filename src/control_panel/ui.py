@@ -1,45 +1,55 @@
-"""Everything the person sees: menus, prompts and coloured messages.
+"""Everything the person sees: menus, questions and messages, with plain input() and print().
 
-They work like the old Linux control panel's:
-
-- a menu is a numbered list: type the number, then press Enter;
-- a question says what q and Enter do: "Grad year ([q]uit | [Enter] = 2027): ";
-- a yes or no question is "Delete it? y/[n] ", the [ ] marking what Enter means.
-
-Every answer needs Enter, and q always goes back (or quits, from the main menu).
+- A panel clears the screen and shows its heading, then its numbered menu.
+- A menu: type a number and press Enter, or q to go back (or quit, from the main menu).
+- A question says what q does: "Grad year (Enter = 2027), or (q)uit: ".
+- When something's done, "Press Enter to go back." keeps the result on screen.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from contextlib import contextmanager
+from getpass import getpass
 from typing import Any
 
-from prompt_toolkit import print_formatted_text
-from prompt_toolkit import prompt as _prompt
-from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
-from prompt_toolkit.shortcuts import clear as clear_screen
+BOLD, GREEN, YELLOW, RED, RESET = "\033[1m", "\033[32m", "\033[33m", "\033[31;1m", "\033[0m"
+BACK = object()  # a menu choice that means "go back" (left out of the list; q does it)
 
-# The old control panel's colours.
-HEADER = "fg:ansimagenta"
-SUCCESS = "fg:ansigreen bold"
-WARNING = "fg:ansiyellow"
-ERROR = "fg:ansired bold"
-INPUT = "fg:ansiyellow bold"  # questions
-YES_NO = "fg:ansicyan"
+
+def _colours_work() -> bool:
+    if not (sys.stdout is not None and sys.stdout.isatty()):
+        return False
+    if os.name == "nt":  # turn on colours in the Windows console
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        kernel32.SetConsoleMode(handle, mode.value | 4)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    return True
+
+
+_COLOURS = _colours_work()
+
+
+def _print(text: str, colour: str = "") -> None:
+    print(f"{colour}{text}{RESET}" if colour and _COLOURS else text, flush=True)
 
 
 def clear() -> None:
-    clear_screen()
+    if _COLOURS:
+        print("\033[2J\033[3J\033[H", end="", flush=True)
 
 
 def heading(title: str) -> None:
     line = "#" * 60
-    _print(f"{line}\n#{title.upper().center(58)}#\n{line}\n", style=HEADER)
+    _print(f"{line}\n#{title.upper().center(58)}#\n{line}\n", BOLD)
 
 
 def info(text: str) -> None:
@@ -47,152 +57,109 @@ def info(text: str) -> None:
 
 
 def success(text: str) -> None:
-    _print(text, style=SUCCESS)
+    _print(text, GREEN)
 
 
 def warning(text: str) -> None:
-    _print(text, style=WARNING)
+    _print(text, YELLOW)
 
 
 def error(text: str) -> None:
-    _print(text, style=ERROR)
+    _print(text, RED)
 
 
-def _print(text: str, style: str = "") -> None:
-    # prompt_toolkit's Windows output needs a real console; fall back when piped or captured.
-    if sys.stdout is not None and sys.stdout.isatty():
-        print_formatted_text(FormattedText([(style, text)]))
-    else:
-        print(text)
-
-
-def _input(text: str, style: str = INPUT, *, password: bool = False,
-           patch_stdout: bool = False) -> str | None:
-    """What they typed (once they press Enter). None for Ctrl+C, or Ctrl+D on an empty line."""
+def _input(text: str) -> str | None:
+    """What they typed, once they press Enter. None for Ctrl+C or Ctrl+D."""
     try:
-        with _patch_stdout() if patch_stdout else nullcontext():
-            return _prompt(FormattedText([(style, text)]), is_password=password)
+        return input(text)
     except (EOFError, KeyboardInterrupt):
+        print()
         return None
 
 
-def _hints(*hints: str) -> str:
-    return f"({' | '.join(h for h in hints if h)})"
-
-
-def ask(prompt: str, default: str = "", *, hint: str = "",
-        patch_stdout: bool = False) -> str | None:
-    """Ask for some text: "Prompt ([q]uit | [Enter] = default): ".
-
-    Returns what they typed, or the default if they just press Enter (hint says what Enter
-    means when there's no default, e.g. "[Enter] = done"). None if they type q.
-    """
-    enter = f"[Enter] = {default}" if default else hint
-    answer = _input(f"{prompt} {_hints('[q]uit', enter)}: ", patch_stdout=patch_stdout)
+def ask(prompt: str, default: str = "") -> str | None:
+    """'Prompt (Enter = default), or (q)uit: '. What they typed (the default for just
+    Enter), or None for q."""
+    enter = f" (Enter = {default})" if default else ""
+    answer = _input(f"{prompt}{enter}, or (q)uit: ")
     if answer is None or answer.strip().lower() == "q":
         return None
     return answer.strip() or default
 
 
 def ask_password(prompt: str) -> str | None:
-    """None if they type q."""
-    answer = _input(f"{prompt} {_hints('[q]uit')}: ", password=True)
-    return None if answer is None or answer.strip().lower() == "q" else answer
+    try:
+        answer = getpass(f"{prompt}, or (q)uit: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    return None if answer.strip().lower() == "q" else answer
 
 
 def confirm(prompt: str, default: bool = True) -> bool | None:
-    """Yes or no: "Delete it? y/[n] ". None (which also counts as no) if they type q, for
-    when that should mean 'stop' rather than 'no, carry on'."""
+    """'Prompt (Y/n): ' - the capital is what Enter means. None for q (which also counts as
+    no), for when that should mean 'stop' rather than 'no, carry on'."""
     while True:
-        answer = _input(f"{prompt} {'[y]/n' if default else 'y/[n]'} ", style=YES_NO)
-        if answer is None:
+        answer = _input(f"{prompt} ({'Y/n' if default else 'y/N'}): ")
+        if answer is None or answer.strip().lower() == "q":
             return None
         answer = answer.strip().lower()
-        if answer == "q":
-            return None
         if not answer:
             return default
         if answer in ("y", "yes", "n", "no"):
             return answer.startswith("y")
-        error("Type y or n, then press Enter (or q to go back).")
+        error("Type y or n.")
 
 
-def pause(prompt: str = "Press Enter to carry on.") -> None:
-    """Wait for Enter, e.g. so a message can be read before the screen is cleared."""
-    _input(prompt, style="")
+def pause(prompt: str = "Press Enter to go back.") -> None:
+    _input(f"\n{prompt}")
 
 
-BACK = object()  # value of a menu's "Back"/"Quit" choice
+def choice(title: str, value: Any = None) -> tuple[str, Any]:
+    return title, value
 
 
-@dataclass
-class Choice:
-    title: str
-    value: Any = None
-    disabled: str | None = None  # why it can't be chosen, if it can't
-    checked: bool = False  # ticked to start with, in choose_many
+def _items(choices: list) -> list[tuple[str, Any]]:
+    items = [c if isinstance(c, tuple) else (c, c) for c in choices]
+    return [(title, value) for title, value in items if value is not BACK]
 
 
-def choice(title: str, value: Any = None, disabled: str | None = None,
-           checked: bool = False) -> Choice:
-    return Choice(title, value, disabled, checked)
-
-
-def _back_label(title: str) -> str:
-    return "[q]uit" if title.strip().lower() == "quit" else f"[q] {title}"
-
-
-def choose(prompt: str, choices: list[Choice | str]) -> Any:
-    """A numbered menu: type a number, then Enter (just Enter for the first). q is Back (or
-    Quit), which every menu has. Returns the chosen value, or None for Back."""
-    items = [c if isinstance(c, Choice) else Choice(c, c) for c in choices]
-    back = next((c for c in items if c.value is BACK), Choice("Back", BACK))
-    options = [c for c in items if c is not back]
-    _print(prompt, style="bold")
-    number = 0
-    numbered: dict[int, Choice] = {}
-    for item in options:
-        if item.disabled:
-            _print(f"      {item.title} ({item.disabled})", style="fg:ansibrightblack")
-        else:
-            number += 1
-            numbered[number] = item
-            _print(f"  {number}. {item.title}")
-    _print(f"  {_back_label(back.title)}")
+def choose(choices: list, question: str = "") -> Any:
+    """A numbered menu. Returns the chosen value, or None for q."""
+    items = _items(choices)
+    if question:
+        _print(question, BOLD)
+    for number, (title, _) in enumerate(items, start=1):
+        _print(f"  {number}. {title}")
+    print()
     while True:
-        answer = _input("Choose an item ([Enter] = 1): " if numbered else "Choose an item: ")
-        if answer is None or answer.strip().lower() in ("q", "b"):
-            return None
-        answer = answer.strip()
-        if not answer and numbered:
-            return numbered[1].value
-        if answer.isascii() and answer.isdigit() and int(answer) in numbered:
-            return numbered[int(answer)].value
-        error(f"That isn't one of the choices. Type its number (1 to {len(numbered)}), then "
-              "press Enter." if numbered else "There's nothing to choose. Type q to go back.")
-
-
-def choose_many(prompt: str, choices: list[Choice], *,
-                require_one: bool = False) -> list[Any] | None:
-    """A numbered list to pick some from: type their numbers (e.g. 1 3, 2-5, or all), then
-    Enter (just Enter for the ones marked [x]). Returns their values, or None for q."""
-    _print(prompt, style="bold")
-    for number, item in enumerate(choices, start=1):
-        _print(f"  {number}. [{'x' if item.checked else ' '}] {item.title}")
-    ticked = [number for number, item in enumerate(choices, start=1) if item.checked]
-    enter = f"[Enter] = {' '.join(map(str, ticked))}" if ticked else \
-        ("" if require_one else "[Enter] = none")
-    while True:
-        answer = _input(f"Type their numbers, e.g. 1 3, or all {_hints('[q]uit', enter)}: ")
+        answer = _input("Choose an item or (q)uit: ")
         if answer is None or answer.strip().lower() == "q":
             return None
-        numbers = _numbers(answer, len(choices)) if answer.strip() else ticked
-        if numbers is None:
-            error(f"Type numbers from 1 to {len(choices)}, e.g. 1 3 or 2-4, then press Enter.")
-        elif require_one and not numbers:
-            error("Pick at least one.")
-        else:
-            return [choices[n - 1].value for n in numbers]
+        answer = answer.strip()
+        if answer.isascii() and answer.isdigit() and 1 <= int(answer) <= len(items):
+            print()
+            return items[int(answer) - 1][1]
+        error(f"Type a number from 1 to {len(items)}." if items else "Type q to go back.")
+
+
+def choose_many(choices: list, question: str = "") -> list[Any] | None:
+    """A numbered list to pick some from: '1 3', '2-4' or 'all'. None for q."""
+    items = _items(choices)
+    if question:
+        _print(question, BOLD)
+    for number, (title, _) in enumerate(items, start=1):
+        _print(f"  {number}. {title}")
+    print()
+    while True:
+        answer = _input("Type their numbers (e.g. 1 3, or all), or (q)uit: ")
+        if answer is None or answer.strip().lower() == "q":
+            return None
+        numbers = _numbers(answer, len(items))
+        if numbers:
+            print()
+            return [items[n - 1][1] for n in numbers]
+        error(f"Type numbers from 1 to {len(items)}, e.g. 1 3 or 2-4.")
 
 
 def _numbers(text: str, count: int) -> list[int] | None:
@@ -209,6 +176,24 @@ def _numbers(text: str, count: int) -> list[int] | None:
             return None
         picked += [n for n in range(start, end + 1) if n not in picked]
     return sorted(picked)
+
+
+def run_menu(title: str, actions: list[tuple[str, Any]], do: Callable[[Any], None], *,
+             pause_after: bool = True) -> None:
+    """A panel: clear the screen, show its heading and menu, and do what's chosen (showing
+    its name first, so it's clear what the questions are about), until q."""
+    while True:
+        clear()
+        heading(title)
+        picked = choose([(name, (name, action)) for name, action in actions])
+        if picked is None:
+            return
+        name, action = picked
+        _print(name, BOLD)
+        print()
+        do(action)
+        if pause_after:
+            pause()
 
 
 @contextmanager

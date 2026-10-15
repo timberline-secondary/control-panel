@@ -54,7 +54,6 @@ class TvsSettings:
     username: str = "pi"
     password: str | None = None
     media_dir: str = "/home/pi/rs_media"  # the folder Raspberry Slideshow plays
-    shrines_dir: str = ""  # where shrines are saved; empty means Documents/Hackerspace shrines
     ffmpeg: str = ""  # ffmpeg program to use; empty means download it when it's first needed
     # The Pi that keeps each shrine's original art (with the same login as the TVs), and
     # the folder on its external drive with a folder for each TV (tv1 to tv4) in it.

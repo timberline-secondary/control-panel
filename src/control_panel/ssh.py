@@ -179,6 +179,12 @@ class PiConnection:
                  progress: Callable[[int, int], None] | None = None) -> None:
         self.sftp.get(remote_path, str(local_path), callback=progress)
 
+    def open(self, remote_path: str) -> BinaryIO:
+        """A file to read, e.g. to upload it straight to another Pi."""
+        f = self.sftp.open(remote_path, "rb")
+        f.prefetch()  # much faster for reading the whole file
+        return f
+
     def remove(self, remote_path: str) -> None:
         self.sftp.remove(remote_path)
 

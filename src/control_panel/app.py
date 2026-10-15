@@ -10,7 +10,7 @@ from pathlib import Path
 from control_panel import __version__, config, ui, updater
 from control_panel.panels import grade9, themes, tvs
 
-PANELS = [themes, tvs, grade9]
+PANELS = [tvs, themes, grade9]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -133,16 +133,9 @@ def _install(release: updater.Release, exe: Path) -> Path | None:
 
 
 def _main_menu(settings: config.Config) -> None:
-    while True:
-        ui.clear()
-        ui.heading(f"Hackerspace Control Panel v{__version__}")
-        choices = [ui.choice(panel.TITLE, panel) for panel in PANELS]
-        choices.append(ui.choice("Quit", ui.BACK))
-        panel = ui.choose("Choose a panel", choices)
-        if panel is None:
-            return
-        ui.clear()
-        panel.run(settings)
+    ui.run_menu(f"Hackerspace Control Panel v{__version__}",
+                [(panel.TITLE, panel) for panel in PANELS],
+                lambda panel: panel.run(settings), pause_after=False)
 
 
 def _pause_if_double_clicked(exit_code: int) -> int:

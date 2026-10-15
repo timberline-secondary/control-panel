@@ -27,7 +27,8 @@ from control_panel import __version__, login, ui
 from control_panel.config import Config, ThemesSettings
 from control_panel.ssh import CommandResult, ConnectionFailed, PiConnection
 
-TITLE = "Entrance themes (pi-themes)"
+TITLE = "Entrance Theme Machine"
+DOCS = "https://github.com/timberline-secondary/themes"
 
 MAX_MP3_BYTES = 50_000_000
 PLAYER_STARTUP_SECONDS = 30  # importing pygame on a Pi is slow
@@ -290,7 +291,7 @@ def play(pi: ThemesPi) -> None:
                 "codes don't affect the keypad.\n"
                 "Leaving this screen stops anything that's still playing.")
         while not session.ended.is_set():
-            code = ui.ask("Theme code", patch_stdout=True)
+            code = ui.ask("Type a theme code to play it")
             if code is None or code.lower() == "exit":
                 break
             if code and not session.ended.is_set():
@@ -301,7 +302,7 @@ def play(pi: ThemesPi) -> None:
 
 def speak(pi: ThemesPi) -> None:
     ui.info("Type something and pi-themes will say it out loud.")
-    while (text := ui.ask("Say")) is not None:
+    while (text := ui.ask("Type something to say")) is not None:
         if text:
             result = pi.speak(text)
             if not result.ok:
@@ -331,11 +332,10 @@ def add_theme(pi: ThemesPi) -> None:
                 return
             if not pi.has_theme(code):
                 break
-            choice = ui.choose(f"There's already a theme with code {code}.", [
-                ui.choice("Use a different code", "different"),  # first, so Enter is safe
+            choice = ui.choose([
+                ui.choice("Use a different code", "different"),
                 ui.choice("Replace it", "replace"),
-                ui.choice("Cancel (don't add this theme)", ui.BACK),
-            ])
+            ], f"There's already a theme with code {code}.")
             if choice is None:
                 return
             if choice == "replace":
@@ -378,7 +378,7 @@ def list_themes(pi: ThemesPi) -> None:
         return
     ui.success(f"{len(codes)} themes on pi-themes:")
     ui.info(columns(codes))
-    while text := ui.ask("Search for codes containing", hint="[Enter] = done"):
+    while text := ui.ask("Type part of a code to search for it (Enter = done)"):
         matches = search_codes(codes, text)
         if matches:
             ui.success(f"{len(matches)} of {len(codes)} codes contain '{text}':")
@@ -387,18 +387,17 @@ def list_themes(pi: ThemesPi) -> None:
             ui.warning(f"No codes contain '{text}'.")
 
 
-def mute_or_unmute(pi: ThemesPi) -> None:
+def toggle_mute(pi: ThemesPi) -> None:
     level = pi.volume()
-    ui.info("Couldn't read the current volume." if level is None
-            else f"The entrance speaker is at {level}% volume.")
-    percent = ui.choose("Mute or unmute it?", [
-        ui.choice("Mute", 0), ui.choice("Unmute", 100), ui.choice("Back", ui.BACK),
-    ])
-    if percent is None:
-        return
-    result = pi.set_volume(percent)
+    if level is None:
+        mute = ui.confirm("Couldn't read the volume. Mute it? (n = unmute)", default=True)
+        if mute is None:
+            return
+    else:
+        mute = level > 0
+    result = pi.set_volume(0 if mute else 100)
     if result.ok:
-        ui.success("Muted." if percent == 0 else "Unmuted.")
+        ui.success("Muted the entrance speaker." if mute else "Unmuted the entrance speaker.")
     else:
         ui.error(f"That didn't work: {result.output.strip()}")
 
@@ -417,38 +416,42 @@ def reboot(pi: ThemesPi) -> None:
         ui.error(f"Couldn't reboot: {result.output.strip() or result.exit_status}")
 
 
+def docs() -> None:
+    ui.info(f"pi-themes runs the theme player from {DOCS}")
+    ui.info("Its README says how it's set up, and how the keypad codes work.")
+
+
 ACTIONS = [
-    ("Play a theme", play),
-    ("Say something (text to speech)", speak),
     ("Add a new theme", add_theme),
-    ("List themes", list_themes),
-    ("Mute / unmute the speaker", mute_or_unmute),
+    ("Play a theme", play),
+    ("List and search themes", list_themes),
+    ("Toggle mute", toggle_mute),
+    ("Say something (text to speech)", speak),
     ("Reboot pi-themes", reboot),
+    ("pi-themes documentation", docs),
 ]
 
 
 def run(config: Config) -> None:
-    settings = config.themes
-    ui.heading(TITLE)
-    while True:
-        action = ui.choose("What would you like to do?",
-                           [ui.choice(title, action) for title, action in ACTIONS]
-                           + [ui.choice("Back", ui.BACK)])
-        if action is None:
+    ui.run_menu(TITLE, ACTIONS, lambda action: _do(action, config.themes))
+
+
+def _do(action, settings: ThemesSettings) -> None:
+    if action is docs:
+        docs()
+        return
+    try:
+        connection = login.connect(settings)
+        if connection is None:
             return
-        try:
-            connection = login.connect(settings)
-            if connection is None:
-                continue
-            with connection:
-                action(ThemesPi(connection, settings))
-        except (ConnectionFailed, ThemeError) as e:
-            ui.error(str(e))
-        except TimeoutError:
-            ui.error(f"{settings.host} stopped answering. Try again, or reboot it if it keeps "
-                     "happening.")
-        except (OSError, paramiko.SSHException) as e:
-            ui.error(f"Lost the connection to {settings.host}: {e}")
-        except KeyboardInterrupt:
-            ui.warning("Cancelled.")
-        print()
+        with connection:
+            action(ThemesPi(connection, settings))
+    except (ConnectionFailed, ThemeError) as e:
+        ui.error(str(e))
+    except TimeoutError:
+        ui.error(f"{settings.host} stopped answering. Try again, or reboot it if it keeps "
+                 "happening.")
+    except (OSError, paramiko.SSHException) as e:
+        ui.error(f"Lost the connection to {settings.host}: {e}")
+    except KeyboardInterrupt:
+        ui.warning("Cancelled.")
