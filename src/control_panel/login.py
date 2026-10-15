@@ -54,7 +54,7 @@ def connect(settings: PiSettings) -> PiConnection | None:
         if password is None:
             if typed_tries == MAX_TYPED_TRIES:
                 raise ConnectionFailed(f"Couldn't log in to {settings.host}.")
-            password = ui.ask_password(f"Password for {account}:")
+            password = ui.ask_password(f"Password for {account}")
             if password is None:
                 return None
             typed_tries += 1

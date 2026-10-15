@@ -290,7 +290,7 @@ def play(pi: ThemesPi) -> None:
                 "codes don't affect the keypad.\n"
                 "Leaving this screen stops anything that's still playing.")
         while not session.ended.is_set():
-            code = ui.ask(f"Theme code {ui.QUIT_HINT}", patch_stdout=True)
+            code = ui.ask("Theme code", patch_stdout=True)
             if code is None or code.lower() == "exit":
                 break
             if code and not session.ended.is_set():
@@ -301,7 +301,7 @@ def play(pi: ThemesPi) -> None:
 
 def speak(pi: ThemesPi) -> None:
     ui.info("Type something and pi-themes will say it out loud.")
-    while (text := ui.ask(f"Say {ui.QUIT_HINT}")) is not None:
+    while (text := ui.ask("Say")) is not None:
         if text:
             result = pi.speak(text)
             if not result.ok:
@@ -312,7 +312,7 @@ def speak(pi: ThemesPi) -> None:
 def add_theme(pi: ThemesPi) -> None:
     ui.info("Add a theme from a link to an mp3, or from an mp3 file on this computer.")
     while True:
-        source = ui.ask(f"Paste a link, or drag an mp3 file into this window {ui.QUIT_HINT}")
+        source = ui.ask("Paste a link, or drag an mp3 file into this window")
         if source is None:
             return
         if not source:
@@ -332,8 +332,8 @@ def add_theme(pi: ThemesPi) -> None:
             if not pi.has_theme(code):
                 break
             choice = ui.choose(f"There's already a theme with code {code}.", [
+                ui.choice("Use a different code", "different"),  # first, so Enter is safe
                 ui.choice("Replace it", "replace"),
-                ui.choice("Use a different code", "different"),
                 ui.choice("Cancel (don't add this theme)", ui.BACK),
             ])
             if choice is None:
@@ -356,10 +356,8 @@ def add_theme(pi: ThemesPi) -> None:
 
 
 def _ask_code(suggestion: str | None) -> str | None:
-    # Not pre-filled, so typing q to go back always works.
-    hint = f"(Enter for {suggestion}, q to go back)" if suggestion else ui.QUIT_HINT
     while True:
-        code = ui.ask(f"What code should play it? {hint}")
+        code = ui.ask("What code should play it?", default=suggestion or "")
         if code is None:
             return None
         code = code or suggestion or ""
@@ -380,7 +378,7 @@ def list_themes(pi: ThemesPi) -> None:
         return
     ui.success(f"{len(codes)} themes on pi-themes:")
     ui.info(columns(codes))
-    while text := ui.ask("Search for codes containing (or just press Enter to go back)"):
+    while text := ui.ask("Search for codes containing", hint="[Enter] = done"):
         matches = search_codes(codes, text)
         if matches:
             ui.success(f"{len(matches)} of {len(codes)} codes contain '{text}':")

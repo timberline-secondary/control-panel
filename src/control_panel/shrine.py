@@ -228,6 +228,17 @@ def classify(ffmpeg_path: Path, path: Path) -> str:
     raise ShrineError("it isn't a picture or video")
 
 
+def is_animated(path: Path) -> bool:
+    """Whether a picture file is really an animation (a GIF, PNG or WebP that moves), as
+    classify() decides: e.g. a camera JPEG with a preview image in it is a picture."""
+    try:
+        with Image.open(path) as image:
+            return image.format in ("GIF", "PNG", "WEBP") and \
+                bool(getattr(image, "is_animated", False))
+    except Exception:  # noqa: BLE001 (not a picture, or a damaged one)
+        return False
+
+
 def gather(ffmpeg_path: Path, source: Path, work_dir: Path, *, depth: int = 0,
            budget: list[int] | None = None) -> tuple[list[Media], list[Skipped]]:
     """Every picture and video in a folder (and its subfolders), a file, or a zip file.
@@ -545,6 +556,14 @@ def video_file_name(name: str, label: str, taken: set[str]) -> str:
     return candidate
 
 
+def video_names(name: str, media: list[Media],
+                taken: set[str] | None = None) -> list[tuple[Media, str]]:
+    """The videos and animations in media, with the names make() gives their videos."""
+    taken = set(taken or ())
+    return [(item, video_file_name(name, item.label, taken))
+            for item in media if item.kind in (VIDEO, ANIMATION)]
+
+
 Progress = Callable[[str], AbstractContextManager[Callable[[float], None]]]
 
 
@@ -590,9 +609,8 @@ def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
         except Exception as e:
             problems.append(Skipped("the slideshow", f"couldn't make it ({e})"))
 
-    taken = set(taken or ())
-    for item in (m for m in media if m.kind in (VIDEO, ANIMATION)):
-        output = work_dir / video_file_name(name, item.label, taken)
+    for item, file_name in video_names(name, media, taken):
+        output = work_dir / file_name
         try:
             with progress(f"Converting {item.label}") as update:
                 _convert(ffmpeg_path, item, output, work_dir, update)
