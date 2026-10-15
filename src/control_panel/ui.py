@@ -43,7 +43,11 @@ def _print(text: str, colour: str = "") -> None:
 
 
 def clear() -> None:
-    if _COLOURS:
+    if not (sys.stdout is not None and sys.stdout.isatty()):
+        return
+    if os.name == "nt":
+        os.system("cls")  # noqa: S605 (works in every Windows console)
+    else:
         print("\033[2J\033[3J\033[H", end="", flush=True)
 
 
