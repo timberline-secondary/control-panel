@@ -292,65 +292,6 @@ def test_animation_frames_and_playlist(tmp_path):
     assert lines[-1] == "file '00002.png'"
 
 
-def test_video_file_names():
-    taken = set()
-    assert shrine.video_file_name("ann.lee", "Videos/My Film.MOV", taken) == \
-        "ann.lee.z.my_film.mp4"
-    assert shrine.video_file_name("ann.lee", "my film.mp4", taken) == "ann.lee.z.my_film-2.mp4"
-    assert shrine.video_file_name("ann.lee", "???.gif", taken) == "ann.lee.z.video.mp4"
-    assert shrine.video_file_name("ann.lee", "Scene.A.final.mov", taken) == \
-        "ann.lee.z.scene-a-final.mp4"  # no dots, so whose it is stays clear
-
-
-def test_is_part_of():
-    assert shrine.is_part_of("ann.lee.a.mp4", "ann.lee")
-    assert shrine.is_part_of("ann.lee.z.cat.mp4", "ann.lee")
-    assert not shrine.is_part_of("ann.leeson.a.mp4", "ann.lee")
-    assert not shrine.is_part_of("ann.lee.a.mp4.part", "ann.lee")
-    assert not shrine.is_part_of("ann.lee.a.mp4", "ann")
-    # A middle initial of A or Z doesn't confuse it.
-    assert not shrine.is_part_of("jo.a.brown.a.mp4", "jo")
-    assert not shrine.is_part_of("jo.z.collection.a.mp4", "jo")
-    assert shrine.is_part_of("jo.a.smith.z.dance.mp4", "jo.a.smith")
-    # The old control panel's names kept the original name and extension.
-    assert shrine.is_part_of("ann.lee.z.cat.mov.mp4", "ann.lee")
-    assert shrine.is_part_of("ann.lee.z.IMG_1234.MOV.mp4", "ann.lee")
-    assert shrine.is_part_of("ann.lee.z.final.v2.mp4.mp4", "ann.lee")
-    assert not shrine.is_part_of("jo.z.smith.z.clip.mov.mp4", "jo")  # jo.z.smith's
-
-
-def test_save_replaces_the_old_shrine(tmp_path):
-    folder = tmp_path / "ann.lee"
-    folder.mkdir()
-    for name in ["ann.lee.a.mp4", "ann.lee.z.cat.mp4", "ann.leeson.a.mp4", "notes.txt"]:
-        (folder / name).write_bytes(b"old")
-    (tmp_path / "ann.lee.a.mp4").write_bytes(b"new")
-    saved = shrine.save([tmp_path / "ann.lee.a.mp4"], folder, "ann.lee")
-    assert saved == [folder / "ann.lee.a.mp4"]
-    assert {p.name: p.read_bytes() for p in folder.iterdir()} == {
-        "ann.lee.a.mp4": b"new", "ann.leeson.a.mp4": b"old", "notes.txt": b"old"}
-
-
-def test_save_is_all_or_nothing(tmp_path, monkeypatch):
-    folder = tmp_path / "ann.lee"
-    folder.mkdir()
-    for name in ["ann.lee.a.mp4", "ann.lee.z.cat.mp4"]:
-        (folder / name).write_bytes(b"old")
-    (tmp_path / "ann.lee.a.mp4").write_bytes(b"new")
-    real_replace = shrine.os.replace
-
-    def in_use(source, target):  # as Windows does with a video that's open in a player
-        if Path(source).name == "ann.lee.z.cat.mp4":
-            raise PermissionError(32, "The file is being used by another process")
-        real_replace(source, target)
-    monkeypatch.setattr(shrine.os, "replace", in_use)
-    with pytest.raises(PermissionError):
-        shrine.save([tmp_path / "ann.lee.a.mp4"], folder, "ann.lee")
-    assert {p.name: p.read_bytes() for p in folder.iterdir()} == {
-        "ann.lee.a.mp4": b"old", "ann.lee.z.cat.mp4": b"old"}
-    assert (tmp_path / "ann.lee.a.mp4").exists()  # the new one is still there to try again
-
-
 @pytest.mark.parametrize("url, expected", [
     ("https://drive.google.com/file/d/abc_123/view?usp=sharing",
      "https://drive.google.com/uc?export=download&id=abc_123"),
@@ -421,17 +362,27 @@ def _duration(ffmpeg_path, video):
     return ffmpeg.probe(ffmpeg_path, video).duration
 
 
-def test_make_a_shrine(tmp_path, ffmpeg_path):
+def test_make_a_slideshow(tmp_path, ffmpeg_path):
     make_media(tmp_path / "art")
     (tmp_path / "art" / "broken.jpg").write_bytes(b"\xff\xd8\xff\xe0 not really a jpeg")
     media, _ = shrine.gather(ffmpeg_path, tmp_path / "art", tmp_path / "work")
-    media.append(shrine.Media(tmp_path / "art" / "broken.jpg", PICTURE, "broken.jpg"))
-    made, problems = shrine.make(ffmpeg_path, "ann.lee", Title("Ann Lee", "Digital Art", "2027"),
-                                 media, tmp_path / "work", no_progress)
-    assert [p.name for p in made] == ["ann.lee.a.mp4", "ann.lee.z.dance.mp4"]
+    pictures = [m for m in media if m.kind == PICTURE]
+    pictures.append(shrine.Media(tmp_path / "art" / "broken.jpg", PICTURE, "broken.jpg"))
+    output = tmp_path / "ann.lee.a.mp4"
+    problems = shrine.make_slideshow(ffmpeg_path, pictures, output, tmp_path / "work",
+                                     no_progress)
     assert [p.label for p in problems] == ["broken.jpg"]
-    assert _duration(ffmpeg_path, made[0]) == pytest.approx(8 * 4 + 1, abs=0.1)  # title + 3
-    assert _duration(ffmpeg_path, made[1]) == pytest.approx(5.4, abs=0.1)  # 0.6 s, 9 times
+    assert _duration(ffmpeg_path, output) == pytest.approx(8 * 3 + 1, abs=0.1)
+    with pytest.raises(shrine.ShrineError):
+        shrine.make_slideshow(ffmpeg_path, pictures[-1:], output, tmp_path / "work", no_progress)
+
+
+def test_convert_an_animation(tmp_path, ffmpeg_path):
+    make_media(tmp_path / "art")
+    media, _ = shrine.gather(ffmpeg_path, tmp_path / "art", tmp_path / "work")
+    dance = next(m for m in media if m.kind == ANIMATION)
+    shrine.convert(ffmpeg_path, dance, tmp_path / "dance.mp4", tmp_path / "work", lambda f: None)
+    assert _duration(ffmpeg_path, tmp_path / "dance.mp4") == pytest.approx(5.4, abs=0.1)
 
 
 @pytest.mark.parametrize("width", [32, 33])
@@ -444,52 +395,13 @@ def test_pixel_art_stays_sharp(tmp_path, ffmpeg_path, width):
         frames.append(frame)
     frames[0].save(tmp_path / "sprite.gif", save_all=True, append_images=frames[1:],
                    duration=500)
-    made, _ = shrine.make(ffmpeg_path, "x", None,
-                          [shrine.Media(tmp_path / "sprite.gif", ANIMATION, "sprite.gif")],
-                          tmp_path / "work", no_progress)
-    subprocess.run([str(ffmpeg_path), "-v", "error", "-i", str(made[0]), "-frames:v", "1",
+    output = tmp_path / "sprite.mp4"
+    shrine.convert(ffmpeg_path, shrine.Media(tmp_path / "sprite.gif", ANIMATION, "sprite.gif"),
+                   output, tmp_path / "work", lambda f: None)
+    subprocess.run([str(ffmpeg_path), "-v", "error", "-i", str(output), "-frames:v", "1",
                     str(tmp_path / "frame.png")], check=True)
     frame = Image.open(tmp_path / "frame.png").convert("RGB")
     row = [frame.getpixel((x, 540)) for x in range(1920)]
     content = [p for p in row if max(p) > 60]
     assert len(content) == 1080  # square, full height
     assert not [p for p in content if p[0] > 60 and p[2] > 60]  # no red and blue mixed
-
-
-def test_make_a_title_only_shrine(tmp_path, ffmpeg_path):
-    made, problems = shrine.make(ffmpeg_path, "ann.lee", Title("Ann Lee"), [], tmp_path,
-                                 no_progress)
-    assert [p.name for p in made] == ["ann.lee.a.mp4"] and not problems
-    assert _duration(ffmpeg_path, made[0]) == pytest.approx(9, abs=0.1)
-
-
-def test_save_when_adding_keeps_the_other_videos(tmp_path):
-    folder = tmp_path / "ann.lee"
-    folder.mkdir()
-    for name in ["ann.lee.a.mp4", "ann.lee.z.cat.mp4"]:
-        (folder / name).write_bytes(b"old")
-    (tmp_path / "ann.lee.a.mp4").write_bytes(b"new")
-    shrine.save([tmp_path / "ann.lee.a.mp4"], folder, "ann.lee", replace_all=False)
-    assert {p.name: p.read_bytes() for p in folder.iterdir()} == {
-        "ann.lee.a.mp4": b"new", "ann.lee.z.cat.mp4": b"old"}
-
-
-def test_new_videos_dont_take_the_names_of_old_ones(tmp_path, ffmpeg_path):
-    frames = [Image.new("RGB", (16, 16), c) for c in ("red", "green")]
-    frames[0].save(tmp_path / "cat.gif", save_all=True, append_images=frames[1:], duration=500)
-    made, _ = shrine.make(ffmpeg_path, "ann.lee", None,
-                          [shrine.Media(tmp_path / "cat.gif", ANIMATION, "cat.gif")],
-                          tmp_path / "work", no_progress, taken={"ann.lee.z.cat.mp4"})
-    assert [p.name for p in made] == ["ann.lee.z.cat-2.mp4"]
-
-
-def test_a_camera_jpeg_with_a_preview_in_it_isnt_an_animation(tmp_path):
-    photo = tmp_path / "photo.jpg"
-    Image.new("RGB", (40, 30), "red").save(photo, "MPO", save_all=True,
-                                           append_images=[Image.new("RGB", (20, 15), "blue")])
-    with Image.open(photo) as image:
-        assert image.format == "MPO" and image.is_animated
-    assert not shrine.is_animated(photo)  # as classify() says: it's a picture
-    frames = [Image.new("RGB", (16, 16), c) for c in ("red", "green")]
-    frames[0].save(tmp_path / "spin.gif", save_all=True, append_images=frames[1:])
-    assert shrine.is_animated(tmp_path / "spin.gif")

@@ -179,6 +179,12 @@ class PiConnection:
                  progress: Callable[[int, int], None] | None = None) -> None:
         self.sftp.get(remote_path, str(local_path), callback=progress)
 
+    def open(self, remote_path: str) -> BinaryIO:
+        """A file to read, e.g. to upload it straight to another Pi."""
+        f = self.sftp.open(remote_path, "rb")
+        f.prefetch()  # much faster for reading the whole file
+        return f
+
     def remove(self, remote_path: str) -> None:
         self.sftp.remove(remote_path)
 
@@ -202,7 +208,8 @@ class PiConnection:
         directory, name = posixpath.split(remote_path)
         partial = posixpath.join(directory, f".{name}.part")
         try:
-            size = fileobj.seek(0, 2)  # so progress knows the total
+            fileobj.seek(0, 2)  # so progress knows the total
+            size = fileobj.tell()
             fileobj.seek(0)
             self.sftp.putfo(fileobj, partial, file_size=size, callback=progress)
             self.sftp.posix_rename(partial, remote_path)

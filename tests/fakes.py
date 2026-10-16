@@ -1,6 +1,7 @@
 """Stand-ins for the Pis, shared by the tests."""
 
 import hashlib
+import io
 import posixpath
 import shlex
 from pathlib import Path
@@ -47,6 +48,11 @@ class FakeFilesConnection:
             return CommandResult(0, "".join(
                 f"{'d' if p in self.dirs else 'f'}\t{len(self.files.get(p, b''))}\t"
                 f"{posixpath.basename(p)}\n" for p in sorted(inside)))
+        if command.startswith("rm -rf -- "):
+            gone = shlex.split(command)[-1]
+            self.dirs = {d for d in self.dirs if d != gone and not d.startswith(gone + "/")}
+            self.files = {f: data for f, data in self.files.items() if not f.startswith(gone + "/")}
+            return CommandResult(0, "")
         if command.startswith("sha256sum -- "):
             lines = []
             for path in shlex.split(command)[2:]:
@@ -103,6 +109,11 @@ class FakeFilesConnection:
 
     def remove(self, path):
         del self.files[path]
+
+    def open(self, path):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return io.BytesIO(self.files[path])
 
     def download(self, remote_path, local_path, progress=None):
         if remote_path not in self.files:

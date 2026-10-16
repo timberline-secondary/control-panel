@@ -335,7 +335,7 @@ def add_screen(monkeypatch, tmp_path):
     def run(asks, chooses=(), confirms=()):
         asks, chooses, confirms = iter(asks), iter(chooses), iter(confirms)
         monkeypatch.setattr(themes.ui, "ask", lambda prompt, **k: next(asks))
-        monkeypatch.setattr(themes.ui, "choose", lambda prompt, options: next(chooses))
+        monkeypatch.setattr(themes.ui, "choose", lambda *a, **k: next(chooses))
         monkeypatch.setattr(themes.ui, "confirm", lambda prompt, **k: next(confirms))
         themes.add_theme(pi)
         for left in (asks, chooses, confirms):  # every scripted answer was asked for
@@ -367,3 +367,24 @@ def test_add_theme_can_always_be_left(add_screen, asks, chooses):
     run, song, files, messages = add_screen
     run(asks=[song if a == "SONG" else a for a in asks], chooses=chooses)
     assert files == {"/mnt/usb0/0027.mp3": b""}
+
+
+@pytest.mark.parametrize("level, expected", [(42, "0%"), (0, "100%")])
+def test_toggle_mute(monkeypatch, level, expected):
+    pi, connection = make_pi()
+    monkeypatch.setattr(pi, "volume", lambda: level)
+    monkeypatch.setattr(themes.ui, "success", lambda text: None)
+    themes.toggle_mute(pi)
+    assert connection.commands[-1] == (f"amixer sset Headphone,0 {expected}", False)
+
+
+def test_the_menu_is_in_the_asked_for_order():
+    assert [title for title, _ in themes.ACTIONS] == [
+        "Add a new theme", "Play a theme", "List and search themes", "Toggle mute",
+        "Say something (text to speech)", "Reboot pi-themes", "pi-themes documentation"]
+
+
+def test_documentation_needs_no_login(monkeypatch, capsys):
+    monkeypatch.setattr(themes.login, "connect", lambda settings: pytest.fail("logged in"))
+    themes._do(themes.docs, themes.ThemesSettings())
+    assert "https://github.com/timberline-secondary/themes" in capsys.readouterr().out

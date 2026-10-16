@@ -19,7 +19,6 @@ import email.message
 import http.client
 import importlib.resources
 import math
-import os
 import posixpath
 import re
 import shutil
@@ -226,17 +225,6 @@ def classify(ffmpeg_path: Path, path: Path) -> str:
     if probe.has_video and (probe.duration is None or probe.duration >= 0.5):
         return VIDEO
     raise ShrineError("it isn't a picture or video")
-
-
-def is_animated(path: Path) -> bool:
-    """Whether a picture file is really an animation (a GIF, PNG or WebP that moves), as
-    classify() decides: e.g. a camera JPEG with a preview image in it is a picture."""
-    try:
-        with Image.open(path) as image:
-            return image.format in ("GIF", "PNG", "WEBP") and \
-                bool(getattr(image, "is_animated", False))
-    except Exception:  # noqa: BLE001 (not a picture, or a damaged one)
-        return False
 
 
 def gather(ffmpeg_path: Path, source: Path, work_dir: Path, *, depth: int = 0,
@@ -542,86 +530,40 @@ def write_playlist(frames: Frames, loops: int, playlist: Path) -> None:
     playlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def video_file_name(name: str, label: str, taken: set[str]) -> str:
-    """<name>.z.<video's name>.mp4, made unique among taken (which it's added to).
-
-    The video's part has no dots, so it's always clear whose shrine a file is part of.
-    """
-    stem = clean_name(posixpath.splitext(posixpath.basename(label))[0]).replace(".", "-")
-    stem = stem or "video"
-    candidate, n = f"{name}.z.{stem}.mp4", 2
-    while candidate in taken:
-        candidate, n = f"{name}.z.{stem}-{n}.mp4", n + 1
-    taken.add(candidate)
-    return candidate
-
-
-def video_names(name: str, media: list[Media],
-                taken: set[str] | None = None) -> list[tuple[Media, str]]:
-    """The videos and animations in media, with the names make() gives their videos."""
-    taken = set(taken or ())
-    return [(item, video_file_name(name, item.label, taken))
-            for item in media if item.kind in (VIDEO, ANIMATION)]
-
-
 Progress = Callable[[str], AbstractContextManager[Callable[[float], None]]]
 
 
-def make(ffmpeg_path: Path, name: str, title: Title | None, media: list[Media],
-         work_dir: Path, progress: Progress,
-         taken: set[str] | None = None) -> tuple[list[Path], list[Skipped]]:
-    """Make the shrine's videos in work_dir. Returns (the videos, what couldn't be used).
+def make_slideshow(ffmpeg_path: Path, pictures: list[Media], output: Path, work_dir: Path,
+                   progress: Progress) -> list[Skipped]:
+    """Make a slideshow of the pictures, in that order. Returns the ones that couldn't be
+    used; raises ShrineError if none could.
 
     progress(label) is a context manager giving a function to report progress (0 to 1).
-    One file that can't be used is reported, rather than stopping the whole shrine.
-    taken: video names the shrine already has, so new ones don't replace them.
     """
-    made: list[Path] = []
     problems: list[Skipped] = []
     slides: list[Path] = []
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
-    if title:
-        slides.append(slides_dir / "0000.png")
-        title_card(title).save(slides[0])
-
-    pictures = [m for m in media if m.kind == PICTURE]
-    if pictures:
-        with progress(f"Getting {len(pictures)} picture(s) ready") as update:
-            for i, picture in enumerate(pictures, start=1):
-                slide = slides_dir / f"{i:04d}.png"
-                try:
-                    prepare_picture(picture.path, slide)
-                    slides.append(slide)
-                except Exception as e:  # a damaged or odd file; Pillow raises all sorts
-                    problems.append(Skipped(picture.label, f"couldn't read it ({e})",
-                                            picture.path))
-                update(i / len(pictures))
-
-    if slides:
-        output = work_dir / f"{name}.a.mp4"
-        try:
-            with progress(f"Making the slideshow ({len(slides)} slides)") as update:
-                ffmpeg.encode(ffmpeg_path, slideshow_frames(slides),
-                              FPS * slideshow_seconds(len(slides)), slideshow_args(output),
-                              progress=update)
-            made.append(output)
-        except Exception as e:
-            problems.append(Skipped("the slideshow", f"couldn't make it ({e})"))
-
-    for item, file_name in video_names(name, media, taken):
-        output = work_dir / file_name
-        try:
-            with progress(f"Converting {item.label}") as update:
-                _convert(ffmpeg_path, item, output, work_dir, update)
-            made.append(output)
-        except Exception as e:
-            problems.append(Skipped(item.label, f"couldn't convert it ({e})", item.path))
-    return made, problems
+    with progress(f"Getting {len(pictures)} picture(s) ready") as update:
+        for i, picture in enumerate(pictures, start=1):
+            slide = slides_dir / f"{i:04d}.png"
+            try:
+                prepare_picture(picture.path, slide)
+                slides.append(slide)
+            except Exception as e:  # a damaged or odd file; Pillow raises all sorts
+                problems.append(Skipped(picture.label, f"couldn't read it ({e})", picture.path))
+            update(i / len(pictures))
+    if not slides:
+        raise ShrineError("none of its pictures could be read")
+    with progress(f"Making the slideshow ({len(slides)} slides)") as update:
+        ffmpeg.encode(ffmpeg_path, slideshow_frames(slides), FPS * slideshow_seconds(len(slides)),
+                      slideshow_args(output), progress=update)
+    return problems
 
 
-def _convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
-             update: Callable[[float], None]) -> None:
+def convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
+            update: Callable[[float], None]) -> None:
+    """Make a video or animation into a video the TVs can play."""
     if item.kind == VIDEO:
         seconds = ffmpeg.probe(ffmpeg_path, item.path).duration
         args = video_args(item.path, output,
@@ -640,59 +582,3 @@ def _convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
                       scale_flags="neighbor" if sharp else "lanczos", max_seconds=once * loops)
     ffmpeg.run(ffmpeg_path, args, seconds=once * loops, progress=update)
     shutil.rmtree(folder, ignore_errors=True)
-
-
-def save(made: list[Path], folder: Path, name: str, replace_all: bool = True) -> list[Path]:
-    """Copy newly made videos into folder, in place of the shrine's old ones there (or, with
-    replace_all=False, only the ones with the same names, as when adding art).
-
-    All or nothing: if something's in the way (e.g. Windows won't let go of an old video
-    because it's open in a video player), OSError is raised and the folder is as it was.
-    """
-    folder.mkdir(parents=True, exist_ok=True)
-    new_names = {video.name for video in made}
-    old = [path for path in folder.glob("*.mp4") if is_part_of(path.name, name)
-           and (replace_all or path.name in new_names)]
-    aside: list[tuple[Path, Path]] = []
-    placed: list[Path] = []
-    try:
-        for path in old:
-            hidden = path.with_name(f".{path.name}.old")
-            os.replace(path, hidden)
-            aside.append((hidden, path))
-        for video in made:
-            placed.append(folder / video.name)
-            shutil.copyfile(video, placed[-1])
-    except BaseException:
-        for path in placed:
-            path.unlink(missing_ok=True)
-        for hidden, path in aside:
-            os.replace(hidden, path)
-        raise
-    for hidden, _ in aside:
-        try:
-            hidden.unlink()
-        except OSError:
-            pass  # hidden, so it's harmless
-    return placed
-
-
-# e.g. "IMG_1234.MOV" or "final.v2.mp4", but never part of another shrine ("smith.z.cat.mov")
-_LEGACY_VIDEO = re.compile(
-    r"(?![az]\.)(?!.*\.[az]\.)[^/]+\.(mp4|mov|avi|webm|mkv|ogv|mpe?g|m4v|wmv|gif|3gp|flv|mts|"
-    r"m2ts|ts)", re.IGNORECASE)
-
-
-def is_part_of(file_name: str, name: str) -> bool:
-    """Whether a file on a TV (or in a folder) belongs to the shrine called name.
-
-    Exact, so 'jo' and 'jo.a.smith' (or 'ann.lee' and 'ann.leeson') are never mixed up.
-    """
-    if file_name == f"{name}.a.mp4":
-        return True
-    prefix = f"{name}.z."
-    if not (file_name.startswith(prefix) and file_name.endswith(".mp4")):
-        return False
-    video = file_name[len(prefix):-len(".mp4")]
-    # The old control panel kept the original name: name.z.IMG_1234.MOV.mp4
-    return bool(video) and ("." not in video or bool(_LEGACY_VIDEO.fullmatch(video)))
