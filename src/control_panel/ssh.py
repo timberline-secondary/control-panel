@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import posixpath
 import socket
 import stat
@@ -11,6 +12,11 @@ from pathlib import Path
 from typing import BinaryIO
 
 import paramiko
+
+# paramiko prints connection problems ("Socket exception: ...") from its own thread, over
+# whatever's on the screen. They're reported when the connection is next used instead.
+logging.getLogger("paramiko").addHandler(logging.NullHandler())
+logging.getLogger("paramiko").propagate = False
 
 
 class ConnectionFailed(Exception):

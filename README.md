@@ -46,9 +46,11 @@ The four TV Pis (`pi-tv1` to `pi-tv4`) run Raspberry Slideshow, which plays ever
   can play them (1920x1080, no sound). Short GIFs are looped to at least 5 seconds.
 
 **pi-files is the only place the art lives.** Every shrine's original art is kept there, with
-the videos made from it. Whenever art is added, deleted or removed, the app makes the shrine's
-videos again from the art (on this computer, with ffmpeg), then updates the TVs so they match
-pi-files, saying what it copies and takes off as it goes. Nothing is kept on this computer.
+the videos made from it. Whenever a shrine's art is added, deleted or removed, the app makes that
+shrine's videos again from its art (on this computer, with ffmpeg), then copies them to its TV
+and the hallway, saying what it copies and takes off as it goes. Nothing is kept on this
+computer. A video that's already in the TVs' format (H.264, at most 1920x1080 and 30 fps, no
+sound) is used as it is, under the same name; others are converted, and the app says why.
 
 | TV | What's on it |
 | --- | --- |
@@ -63,7 +65,7 @@ pi-files, saying what it copies and takes off as it goes. Nothing is kept on thi
 | Add art to a shrine | Type part of their username, then drag in or paste the new art. Art that's already there is skipped, so you can drag in their whole folder again; if some pieces have the same names as old ones, it asks whether to replace them (the old ones go to `backup`) or keep both. |
 | See, open or delete a shrine's art | Lists their art (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player); then you can delete it (it's moved to `backup`). |
 | Remove a shrine | Takes it off the TVs, and either moves its art to `backup` (so it can be put back) or deletes it for good. |
-| Update the TVs from pi-files | Makes any videos pi-files is missing (e.g. for art copied there by hand, or from hightower), then makes the TVs match. Videos on a TV that aren't on pi-files are listed, and it asks before backing them up to pi-files and taking them off. |
+| Update the TVs from pi-files | Checks every shrine the chosen TVs show: tidies hightower's loose files, makes any videos pi-files is missing (e.g. for art copied there by hand, or from hightower), then makes the TVs match. Videos on a TV that aren't on pi-files are listed, and you choose: add them to pi-files (each to its student's shrine, so they stay), back them up to pi-files and take them off, or leave them. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |
 | Restart a TV's slideshow, or reboot it | Restarting the slideshow is quick and picks up new or deleted videos. |
 | TV Art Shrines documentation | A link to this page. |
@@ -93,7 +95,9 @@ or collection:
 Art copied there by hand can have any names. hightower's art can be copied over as it is:
 videos it kept loose in a TV's folder (`tv1/ann.lee.z.clip.mp4`) are moved into the student's
 folder, and its old slideshows (`tv1/ann.lee.a.mp4`) into `backup`, as they're made again from
-the pictures. Then use *Update the TVs from pi-files*.
+the pictures. Then use *Update the TVs from pi-files*. Other `.mp4` videos left loose in a TV's
+folder, that aren't anyone's (like `tv3/0_RubeGoldberg-Webb.mp4`), play on that TV as they
+are. Files that aren't art, like hightower's `.py` scripts, are ignored.
 
 To set one up: Raspberry Pi OS Lite, with the hostname `pi-files`, the user `pi` with the same
 password as the TVs, and SSH turned on (all in Raspberry Pi Imager's settings). Format the drive as

@@ -73,7 +73,9 @@ def error(text: str) -> None:
 
 
 def _input(text: str) -> str | None:
-    """What they typed, once they press Enter. None for Ctrl+C or Ctrl+D."""
+    """What they typed, once they press Enter (after a blank line, so the question stands
+    out). None for Ctrl+C or Ctrl+D."""
+    print()
     try:
         return input(text)
     except (EOFError, KeyboardInterrupt):
@@ -92,6 +94,7 @@ def ask(prompt: str, default: str = "") -> str | None:
 
 
 def ask_password(prompt: str) -> str | None:
+    print()
     try:
         answer = getpass(f"{prompt}, or (q)uit: ")
     except (EOFError, KeyboardInterrupt):
@@ -116,7 +119,7 @@ def confirm(prompt: str, default: bool = True) -> bool | None:
 
 
 def pause(prompt: str = "Press Enter to go back.") -> None:
-    _input(f"\n{prompt}")
+    _input(prompt)
 
 
 def choice(title: str, value: Any = None) -> tuple[str, Any]:
@@ -132,17 +135,16 @@ def choose(choices: list, question: str = "") -> Any:
     """A numbered menu. Returns the chosen value, or None for q."""
     items = _items(choices)
     if question:
+        print()
         _print(question, BOLD)
     for number, (title, _) in enumerate(items, start=1):
         _print(f"  {number}. {title}")
-    print()
     while True:
         answer = _input("Choose an item or (q)uit: ")
         if answer is None or answer.strip().lower() == "q":
             return None
         answer = answer.strip()
         if answer.isascii() and answer.isdigit() and 1 <= int(answer) <= len(items):
-            print()
             return items[int(answer) - 1][1]
         error(f"Type a number from 1 to {len(items)}." if items else "Type q to go back.")
 
@@ -151,17 +153,16 @@ def choose_many(choices: list, question: str = "") -> list[Any] | None:
     """A numbered list to pick some from: '1 3', '2-4' or 'all'. None for q."""
     items = _items(choices)
     if question:
+        print()
         _print(question, BOLD)
     for number, (title, _) in enumerate(items, start=1):
         _print(f"  {number}. {title}")
-    print()
     while True:
         answer = _input("Type their numbers (e.g. 1 3, or all), or (q)uit: ")
         if answer is None or answer.strip().lower() == "q":
             return None
         numbers = _numbers(answer, len(items))
         if numbers:
-            print()
             return [items[n - 1][1] for n in numbers]
         error(f"Type numbers from 1 to {len(items)}, e.g. 1 3 or 2-4.")
 
@@ -193,8 +194,8 @@ def run_menu(title: str, actions: list[tuple[str, Any]], do: Callable[[Any], Non
         if picked is None:
             return
         name, action = picked
-        _print(name, BOLD)
         print()
+        _print(name, BOLD)
         do(action)
         if pause_after:
             pause()

@@ -36,8 +36,10 @@ MADE_NOTE = ".made.json"  # in .videos: what its videos were made from
 DELETED = ".deleted.json"  # videos deleted on purpose, to take off TVs without backing up
 CHECK_FILE = ".control-panel-check"
 SPARE_SPACE = 1_000_000_000  # bytes to leave free on the drive
-PICTURE_TYPES = {".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".webp", ".tif", ".tiff",
-                 ".avif"}
+PICTURE_TYPES = {".png", ".jpg", ".jpeg", ".jpe", ".jfif", ".jif", ".jfi", ".pjpeg", ".pjp",
+                 ".gif", ".bmp", ".webp", ".tif", ".tiff", ".avif"}
+VIDEO_TYPES = {".mp4", ".m4v", ".mov", ".avi", ".webm", ".mkv", ".ogv", ".mpg", ".mpeg", ".wmv",
+               ".3gp", ".flv", ".mts", ".m2ts", ".ts"}
 MAX_PIECE_NAME = 80  # characters, so names stay well under the drive's 255-byte limit
 
 Progress = Callable[[int, int], None]  # (bytes done, total)
@@ -75,6 +77,12 @@ def is_title_card(file_name: str) -> bool:
 def is_picture(file_name: str) -> bool:
     """Going by its name: pictures are downloaded to check whether they're animations."""
     return posixpath.splitext(file_name)[1].lower() in PICTURE_TYPES
+
+
+def is_art(file_name: str) -> bool:
+    """A picture or video, going by its name (not e.g. hightower's .py scripts)."""
+    ext = posixpath.splitext(file_name)[1].lower()
+    return ext in PICTURE_TYPES or ext in VIDEO_TYPES
 
 
 def piece(file_name: str, name: str) -> str:
@@ -123,11 +131,26 @@ def stored_name(name: str, label: str, taken: set[str]) -> str:
 
 
 def video_name(path: str, paths: list[str], name: str) -> str:
-    """The name of the video made from a video or animation: <name>.z.<piece>.mp4 (with
-    its type added if another piece has the same name, e.g. clip.gif and clip.mov)."""
-    stem, ext = posixpath.splitext(piece(path, name))
-    clash = any(p != path and posixpath.splitext(piece(p, name))[0] == stem for p in paths)
-    return f"{name}.z.{stem}{'-' + ext[1:] if clash and ext else ''}.mp4"
+    """The name of the video made from a video or animation. A piece already kept under
+    the shrine's name keeps it (name.z.Sunset_Clip.mov -> name.z.Sunset_Clip.mp4), so
+    hightower's videos keep the names the TVs know them by; any other piece is
+    name.z.<piece>.mp4. Its type is added if another piece would get the same name (e.g.
+    clip.gif and clip.mov)."""
+    def stem_of(p: str) -> str:
+        stem = posixpath.splitext(posixpath.basename(p))[0]
+        if stem.lower().startswith(f"{name}.") and stem.lower() != f"{name}.a":
+            return re.sub(r"[^A-Za-z0-9._-]", "_", stem)
+        return f"{name}.z.{posixpath.splitext(piece(p, name))[0]}"
+
+    stem, ext = stem_of(path), posixpath.splitext(path)[1].lower()
+    clash = any(p != path and stem_of(p) == stem for p in paths)
+    return f"{stem}{'-' + ext[1:] if clash and ext else ''}.mp4"
+
+
+def owner_of(file_name: str) -> str | None:
+    """Whose shrine a file is, going by its name: 'ann.lee.z.clip.mp4' -> 'ann.lee'."""
+    owner = re.split(r"\.[az]\.", file_name, maxsplit=1)[0]
+    return None if owner == file_name or not owner else owner
 
 
 def _below(top: str, path: str) -> list[str]:
@@ -227,16 +250,20 @@ class ArtServer:
 
     def tidy(self, tv: int) -> list[str]:
         """Put files left loose in a TV's folder, as hightower kept them, where they go now:
-        a video (name.z.clip.mp4) in its shrine's folder, and a slideshow (name.a.mp4, made
-        from the pictures now) in backup. Returns what it did, and what it left."""
+        a shrine's video (name.z.clip.mp4) in its folder, and a slideshow (name.a.mp4, made
+        from the pictures now) in backup. Other loose videos stay, and play as they are.
+        Returns what it did, and what it left."""
         tv_path = self.tv_path(tv)
         said = []
         for file_name in sorted(self._list(tv_path)[1]):
             path = posixpath.join(tv_path, file_name)
-            owner = re.split(r"\.[az]\.", file_name, maxsplit=1)[0]
-            if file_name.startswith(".") or owner == file_name:
-                said.append(f"tv{tv}/{file_name} isn't in a shrine's folder, so it isn't "
-                            "shown. Move it into one on pi-files.")
+            owner = owner_of(file_name)
+            if file_name.startswith(".") or not is_art(file_name):
+                continue  # e.g. hightower's scripts
+            if owner is None:
+                if posixpath.splitext(file_name)[1].lower() != ".mp4":
+                    said.append(f"tv{tv}/{file_name} isn't in a shrine's folder, so it isn't "
+                                "shown. Move it into one on pi-files.")
             elif file_name.endswith(".a.mp4"):
                 self.set_aside(path, f"tv{tv}-{file_name}")
                 said.append(f"Moved tv{tv}/{file_name} to {BACKUP}: slideshows are made from "
@@ -248,6 +275,12 @@ class ArtServer:
                 self._rename(path, posixpath.join(tv_path, owner, file_name))
                 said.append(f"Moved tv{tv}/{file_name} into tv{tv}/{owner}.")
         return said
+
+    def loose_videos(self, tv: int) -> dict[str, int]:
+        """{file name: size} for the videos left in a TV's folder that aren't any shrine's
+        (e.g. tv3/0_RubeGoldberg-Webb.mp4): they play as they are."""
+        return {f: size for f, size in self._list(self.tv_path(tv))[1].items()
+                if f.lower().endswith(".mp4") and not f.startswith(".") and owner_of(f) is None}
 
     def art_files(self, art: ArtFolder) -> dict[str, int]:
         """{path: size} for a shrine's art."""
@@ -314,6 +347,15 @@ class ArtServer:
 
     def remove(self, path: str) -> None:
         self.connection.remove(path)
+
+    def copy(self, path: str, new_path: str) -> None:
+        """Copy a file on pi-files itself (quick: nothing comes over the network)."""
+        for folder in _below(self.root, posixpath.dirname(new_path)):
+            self._mkdir(folder)
+        result = self.connection.run(f"cp -- {shlex.quote(path)} {shlex.quote(new_path)}",
+                                     timeout=600)
+        if not result.ok:
+            raise ArtError(f"Couldn't copy {path} on pi-files: {result.output.strip()}")
 
     def backup_path(self, label: str) -> str:
         """A new place in the backup folder: <stamp>-<label>."""

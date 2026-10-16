@@ -93,7 +93,12 @@ def test_the_real_download_works(no_downloads_yet):
 @pytest.mark.parametrize("stderr, expected", [
     ("Input #0, mov,mp4\n  Duration: 00:01:02.50, start: 0.000000, bitrate: 1 kb/s\n"
      "  Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1920x1080, 25 fps\n",
-     ffmpeg.Probe(True, 62.5)),
+     ffmpeg.Probe(True, 62.5, "h264", (1920, 1080), 25.0, "yuv420p", False)),
+    ("Input #0, mov,mp4\n  Duration: 00:00:01.00, start: 0.000000, bitrate: 1 kb/s\n"
+     "  Stream #0:0[0x1](und): Video: hevc (Main 10) (hvc1 / 0x31637668), yuv420p10le(tv, "
+     "bt2020nc), 3840x2160 [SAR 1:1 DAR 16:9], 1 kb/s, 59.94 fps, 60 tbr (default)\n"
+     "  Stream #0:1[0x2](und): Audio: aac (LC), 44100 Hz, mono, fltp (default)\n",
+     ffmpeg.Probe(True, 1.0, "hevc", (3840, 2160), 59.94, "yuv420p10le", True)),  # a phone's
     ("Input #0, mp3\n  Duration: 00:03:00.00, start: 0.0, bitrate: 128 kb/s\n"
      "  Stream #0:0: Audio: mp3, 44100 Hz\n"
      "  Stream #0:1: Video: mjpeg (Baseline), 500x500, 90k tbr (attached pic)\n",
