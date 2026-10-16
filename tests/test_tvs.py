@@ -381,7 +381,7 @@ def test_art_that_cant_be_used_is_left_out(tmp_path, monkeypatch, ffmpeg_path, p
 def _rendered(server, path, data):
     server.connection.add(path, data)
     folder = posixpath.dirname(path)
-    server.connection.add(posixpath.join(folder, ".slideshow.json"),
+    server.connection.add(posixpath.join(folder, ".made.json"),
                           json.dumps({"pictures": [], "stills": 0}).encode())
 
 
@@ -619,3 +619,87 @@ def test_grade_9_mode(monkeypatch, engage, tvs_on, volume):
     assert powered == [((1, 2, 3), tvs_on)]
     assert themes_pi.commands == [(f"amixer sset Headphone,0 {volume}%", False)]
     assert ("muted" if engage else "unmuted") in screen.shown("success")
+
+
+# --- From the review -----------------------------------------------------------------------
+
+def test_a_replaced_video_is_made_again(tmp_path, monkeypatch, pi_files):
+    Screen(monkeypatch)
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.clip.mp4", b"first")
+    converted = []
+
+    def convert(server, art, path, video, work, get, media=None):
+        converted.append(server.connection.files[path])
+        server.connection.add(posixpath.join(art.videos, video), b"video")
+    monkeypatch.setattr(tvs, "_convert", convert)
+    get = tvs.Ffmpeg(TvsSettings())
+    tvs.make_videos(pi_files, ANN, get)
+    tvs.make_videos(pi_files, ANN, get)
+    assert converted == [b"first"]  # only once
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.clip.mp4", b"the new one")
+    tvs.make_videos(pi_files, ANN, get)
+    assert converted == [b"first", b"the new one"]
+
+
+def test_art_that_cant_be_used_isnt_tried_again(tmp_path, monkeypatch, ffmpeg_path, pi_files):
+    screen = Screen(monkeypatch)
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.notes.txt", b"not art")
+    get = tvs.Ffmpeg(TvsSettings(ffmpeg=str(ffmpeg_path)))
+    tvs.make_videos(pi_files, ANN, get)
+    got = []
+    monkeypatch.setattr(pi_files, "download", lambda *a, **k: got.append(a))
+    tvs.make_videos(pi_files, ANN, get)
+    assert got == []  # not downloaded again
+    assert screen.shown("warning").count("left out ann.lee.z.notes.txt") == 2  # still said
+
+
+def test_pictures_get_a_picture_type_in_their_name(tmp_path):
+    picture = tmp_path / "photo.jpg_large"
+    Image.new("RGB", (8, 8), "red").save(picture, "PNG")
+    assert tvs._label(shrine.Media(picture, shrine.PICTURE, "photo.jpg_large")) == "photo.png"
+    assert tvs._label(shrine.Media(picture, shrine.PICTURE, "art/sun.jpg")) == "art/sun.jpg"
+    assert tvs._label(shrine.Media(picture, shrine.VIDEO, "clip")) == "clip"
+
+
+def test_a_replace_that_fails_puts_the_old_piece_back(tmp_path, monkeypatch, ffmpeg_path,
+                                                      pi_files):
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.sun.png", b"old")
+    new = tmp_path / "new"
+    new.mkdir()
+    _picture(new / "sun.png", "blue")
+
+    def unplugged(local, path, progress=None):
+        raise tvs.ArtError("Couldn't read sun.png on this computer.")
+    monkeypatch.setattr(pi_files, "upload", unplugged)
+    Screen(monkeypatch, asks=["ann", str(new), ""], chooses=[ANN], confirms=[True])
+    with pytest.raises(tvs.ArtError):
+        tvs.add_art(TvsSettings(ffmpeg=str(ffmpeg_path)))
+    assert pi_files.connection.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.sun.png"] == b"old"
+
+
+def test_videos_deleted_while_a_tv_is_off_come_off_it_later(monkeypatch, pi_files, the_tvs):
+    _rendered(pi_files, "/mnt/ssd/tv1/ann.lee/.videos/ann.lee.a.mp4", b"ann")
+    pi_files.connection.add("/mnt/ssd/tv1/bo.ng/bo.ng.z.a.jpg")
+    monkeypatch.setattr(tvs, "make_videos", lambda server, art, get: set())
+    the_tvs[4].files = {"ann.lee.a.mp4": b"ann", "bo.ng.a.mp4": b"bo"}
+    real_connect = tvs.connect
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {})  # TV 4 is off
+    Screen(monkeypatch)
+    tvs.update_tvs(TvsSettings(), pi_files, [4], gone={"bo.ng.a.mp4"})
+    assert pi_files.deleted() == {"bo.ng.a.mp4"}
+    monkeypatch.setattr(tvs, "connect", real_connect)
+    screen = Screen(monkeypatch)  # no question about backing it up
+    tvs.update_tvs(TvsSettings(), pi_files, [4])
+    screen.finished()
+    assert the_tvs[4].files == {"ann.lee.a.mp4": b"ann"}
+
+
+def test_the_same_video_in_two_tv_folders_is_shown_once(monkeypatch, pi_files, the_tvs):
+    screen = Screen(monkeypatch)
+    _rendered(pi_files, "/mnt/ssd/tv3/skills/.videos/skills.a.mp4", b"tv3's")
+    _rendered(pi_files, "/mnt/ssd/tv4/skills/.videos/skills.a.mp4", b"tv4's")
+    monkeypatch.setattr(tvs, "make_videos", lambda server, art, get: set())
+    tvs.update_tvs(TvsSettings(), pi_files, [4])
+    assert the_tvs[4].files == {"skills.a.mp4": b"tv3's"}
+    assert "has the same name as /mnt/ssd/tv3/skills/.videos/skills.a.mp4" in \
+        screen.shown("warning")

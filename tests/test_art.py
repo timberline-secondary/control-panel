@@ -117,7 +117,7 @@ def test_art_files_and_videos():
     server, connection = make_server()
     connection.add("/mnt/ssd/tv1/ann.lee/a.jpg", b"aa")
     connection.add("/mnt/ssd/tv1/ann.lee/.videos/ann.lee.a.mp4", b"vvv")
-    connection.add("/mnt/ssd/tv1/ann.lee/.videos/.slideshow.json", b"{}")
+    connection.add("/mnt/ssd/tv1/ann.lee/.videos/.made.json", b"{}")
     assert server.art_files(ANN) == {"/mnt/ssd/tv1/ann.lee/a.jpg": 2}
     assert server.videos(ANN) == {"ann.lee.a.mp4": 3}
 

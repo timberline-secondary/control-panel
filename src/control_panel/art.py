@@ -32,10 +32,12 @@ from control_panel.ssh import PiConnection
 TVS = (1, 2, 3, 4)
 BACKUP = "backup"
 VIDEOS = ".videos"
-SLIDESHOW_NOTE = ".slideshow.json"  # in .videos: what its slideshow was made from
+MADE_NOTE = ".made.json"  # in .videos: what its videos were made from
+DELETED = ".deleted.json"  # videos deleted on purpose, to take off TVs without backing up
 CHECK_FILE = ".control-panel-check"
 SPARE_SPACE = 1_000_000_000  # bytes to leave free on the drive
-PICTURE_TYPES = {".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+PICTURE_TYPES = {".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".webp", ".tif", ".tiff",
+                 ".avif"}
 MAX_PIECE_NAME = 80  # characters, so names stay well under the drive's 255-byte limit
 
 Progress = Callable[[int, int], None]  # (bytes done, total)
@@ -252,6 +254,10 @@ class ArtServer:
         return {posixpath.join(art.path, f): size
                 for f, size in self._list(art.path)[1].items() if not f.startswith(".")}
 
+    def subfolders(self, art: ArtFolder) -> list[str]:
+        """Folders in a shrine's folder (its art isn't looked for in them)."""
+        return [f for f in self._list(art.path)[0] if not f.startswith(".")]
+
     def videos(self, art: ArtFolder) -> dict[str, int]:
         """{file name: size} for the videos made from a shrine's art."""
         return {f: size for f, size in self._list(art.videos)[1].items()
@@ -324,6 +330,17 @@ class ArtServer:
         target = self.backup_path(label)
         self._rename(path, target)
         return target
+
+    def put_back(self, aside: str, path: str) -> None:
+        """Undo set_aside()."""
+        self._rename(aside, path)
+
+    def deleted(self) -> set[str]:
+        """Videos deleted on purpose that may still be on a TV that was off."""
+        return set(self.read_json(posixpath.join(self.root, DELETED)).get("videos", []))
+
+    def note_deleted(self, videos: set[str]) -> None:
+        self.write_json(posixpath.join(self.root, DELETED), {"videos": sorted(videos)})
 
     def delete(self, path: str) -> None:
         """Delete a folder and everything in it, for good."""

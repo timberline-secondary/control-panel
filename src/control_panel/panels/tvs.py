@@ -10,6 +10,7 @@ all.
 from __future__ import annotations
 
 import contextlib
+import copy
 import dataclasses
 import ipaddress
 import os
@@ -27,11 +28,12 @@ from pathlib import Path
 from typing import BinaryIO
 
 import paramiko
+from PIL import Image
 
 from control_panel import ffmpeg, login, shrine, ui
 from control_panel.art import (
     BACKUP,
-    SLIDESHOW_NOTE,
+    MADE_NOTE,
     ArtError,
     ArtFolder,
     ArtServer,
@@ -381,101 +383,122 @@ def _get_ffmpeg(settings: TvsSettings) -> Path:
 
 def make_videos(server: ArtServer, art: ArtFolder, get_ffmpeg: Ffmpeg) -> set[str]:
     """Bring a shrine's videos on pi-files up to date with its art: make its slideshow
-    again if its pictures changed, convert any video that hasn't been, and remove the videos
-    of art that's gone. Returns the names of the videos removed."""
+    again if its pictures changed, make a video again if its art changed (or is new), and
+    remove the videos of art that's gone. Returns the names of the videos removed.
+
+    A note in .videos says what each was made from, and which art couldn't be used, so
+    nothing is made again (or tried again) unless its art changes."""
     name = art.name
     files = server.art_files(art)
     videos = server.videos(art)
     pictures = order([p for p in files if is_picture(p)], name)
-    note_path = posixpath.join(art.videos, SLIDESHOW_NOTE)
-    note = server.read_json(note_path)
+    note_path = posixpath.join(art.videos, MADE_NOTE)
+    before = server.read_json(note_path)
+    note = copy.deepcopy(before)
+    sources = note.setdefault("sources", {})  # {video: [the art it's made from, its size]}
+    unusable = note.setdefault("unusable", {})  # {art: [its size, why it can't be used]}
     made_from = [[posixpath.basename(p), files[p]] for p in pictures]
     slideshow = f"{name}.a.mp4"
-    with tempfile.TemporaryDirectory(prefix="shrine-") as work:
+    if folders := server.subfolders(art):
+        ui.warning(f"{art.folder} has folders in it ({', '.join(folders)}); only the art "
+                   "directly in its folder is shown.")
+    with tempfile.TemporaryDirectory(prefix="shrine-", ignore_cleanup_errors=True) as work:
         work = Path(work)
+        got: dict[str, shrine.Media] = {}  # animations already downloaded
         if note.get("pictures") != made_from or (note.get("stills") and slideshow not in videos):
-            note = _make_slideshow(server, art, files, pictures, videos, work, get_ffmpeg)
-            note["pictures"] = made_from
-            server.write_json(note_path, note)
+            stills, got = _make_slideshow(server, art, pictures, work, get_ffmpeg)
+            note.update(pictures=made_from, stills=stills, animated=sorted(got))
         animated = set(note.get("animated", []))
         wanted = {slideshow} if note.get("stills") else set()
-        for path in files:
-            if is_picture(path) and posixpath.basename(path) not in animated:
+        for path, size in files.items():
+            file_name = posixpath.basename(path)
+            if is_picture(path) and file_name not in animated:
+                continue
+            if unusable.get(file_name, [None])[0] == size:
+                ui.warning(f"{art.folder}: left out {file_name}: {unusable[file_name][1]}")
                 continue
             video = video_name(path, list(files), name)
             wanted.add(video)
-            if video not in videos:
-                _convert(server, art, path, video, work, get_ffmpeg)
+            if video in videos and sources.get(video) == [file_name, size]:
+                continue
+            problem = _convert(server, art, path, video, work, get_ffmpeg, got.get(file_name))
+            if problem:
+                ui.warning(f"{art.folder}: left out {file_name}: {problem}")
+                unusable[file_name] = [size, problem]
+            else:
+                sources[video] = [file_name, size]
+        note["sources"] = {v: source for v, source in sources.items() if v in wanted}
+        note["unusable"] = {f: why for f, why in unusable.items()
+                            if posixpath.join(art.path, f) in files}
+        if note != before:
+            server.write_json(note_path, note)
     gone = set(server.videos(art)) - wanted
     for video in sorted(gone):
         server.remove(posixpath.join(art.videos, video))
     return gone
 
 
-def _make_slideshow(server: ArtServer, art: ArtFolder, files: dict[str, int],
-                    pictures: list[str], videos: dict[str, int], work: Path,
-                    get_ffmpeg: Ffmpeg) -> dict:
-    """Make a shrine's slideshow from its still pictures (and videos of its animated ones).
-    Returns what's noted about it: how many stills, and which pictures are animations."""
-    name = art.name
-    stills, animated = [], []
+def _make_slideshow(server: ArtServer, art: ArtFolder, pictures: list[str], work: Path,
+                    get_ffmpeg: Ffmpeg) -> tuple[int, dict[str, shrine.Media]]:
+    """Make a shrine's slideshow from its still pictures. Returns how many stills it has,
+    and the animated pictures, already downloaded: {file name: animation}."""
+    stills, animated = [], {}
     if pictures:
         ui.info(f"{art.folder}: making the slideshow from {len(pictures)} picture(s)...")
     with ui.progress("Getting its pictures from pi-files") as update:
         for i, path in enumerate(pictures, start=1):
+            file_name = posixpath.basename(path)
             local = work / f"{i:04d}{posixpath.splitext(path)[1].lower()}"
             server.download(path, local)
+            update(i / len(pictures))
             try:
                 kind = shrine.classify(get_ffmpeg(), local)
             except shrine.ShrineError as e:
-                ui.warning(f"Left out {posixpath.basename(path)}: {e}")
+                ui.warning(f"Left out {file_name}: {e}")
                 continue
-            media = shrine.Media(local, kind, posixpath.basename(path))
-            (animated if kind == shrine.ANIMATION else stills).append(media)
-            update(i / len(pictures))
-    output = work / f"{name}.a.mp4"
+            if kind == shrine.ANIMATION:
+                animated[file_name] = shrine.Media(local, kind, file_name)
+            else:
+                stills.append(shrine.Media(local, kind, file_name))
     if stills:
+        output = work / f"{art.name}.a.mp4"
         problems = shrine.make_slideshow(get_ffmpeg(), stills, output, work, ui.progress)
         for problem in problems:
             ui.warning(f"Left out {problem.label}: {problem.reason}")
         with ui.progress("Copying the slideshow to pi-files") as update:
             server.upload(output, posixpath.join(art.videos, output.name),
                           lambda done, total: update(done / total if total else 1))
-    for media in animated:
-        video = video_name(posixpath.join(art.path, media.label), list(files), name)
-        if video not in videos:
-            _convert_local(server, art, media, video, work, get_ffmpeg)
-    return {"stills": len(stills), "animated": [media.label for media in animated]}
+    return len(stills), animated
 
 
 def _convert(server: ArtServer, art: ArtFolder, path: str, video: str, work: Path,
-             get_ffmpeg: Ffmpeg) -> None:
-    """Make a video or animation on pi-files into a video for the TVs."""
+             get_ffmpeg: Ffmpeg, media: shrine.Media | None = None) -> str | None:
+    """Make a video or animation on pi-files (or already got: media) into a video for the
+    TVs, on pi-files. Returns why it couldn't be, if it couldn't."""
     file_name = posixpath.basename(path)
-    local = work / f"source{posixpath.splitext(path)[1].lower()}"
-    with ui.progress(f"Getting {file_name} from pi-files") as update:
-        server.download(path, local, lambda done, total: update(done / total if total else 1))
-    try:
-        kind = shrine.classify(get_ffmpeg(), local)
-    except shrine.ShrineError as e:
-        ui.warning(f"{art.folder}: left out {file_name}: {e}")
-        return
-    _convert_local(server, art, shrine.Media(local, kind, file_name), video, work, get_ffmpeg)
-
-
-def _convert_local(server: ArtServer, art: ArtFolder, media: shrine.Media, video: str,
-                   work: Path, get_ffmpeg: Ffmpeg) -> None:
+    if media is None:
+        local = work / f"source{posixpath.splitext(path)[1].lower()}"
+        with ui.progress(f"Getting {file_name} from pi-files") as update:
+            server.download(path, local,
+                            lambda done, total: update(done / total if total else 1))
+        try:
+            kind = shrine.classify(get_ffmpeg(), local)
+        except shrine.ShrineError as e:
+            return str(e)
+        if kind == shrine.PICTURE:
+            return "it's a picture, but its name doesn't say so. Rename it to end in .jpg or .png."
+        media = shrine.Media(local, kind, file_name)
     output = work / video
     try:
-        with ui.progress(f"Converting {media.label}") as update:
+        with ui.progress(f"Converting {file_name}") as update:
             shrine.convert(get_ffmpeg(), media, output, work, update)
     except (shrine.ShrineError, ffmpeg.FfmpegError) as e:
-        ui.warning(f"{art.folder}: couldn't convert {media.label} ({e}).")
-        return
+        return f"couldn't convert it ({e})"
     with ui.progress(f"Copying {video} to pi-files") as update:
         server.upload(output, posixpath.join(art.videos, video),
                       lambda done, total: update(done / total if total else 1))
     output.unlink()
+    return None
 
 
 # --- Keeping the TVs the same as pi-files --------------------------------------------------
@@ -484,30 +507,41 @@ def update_tvs(settings: TvsSettings, server: ArtServer, numbers: list[int],
                gone: set[str] | frozenset[str] = frozenset()) -> None:
     """Make any videos pi-files is missing for these TVs' shrines, then make each TV's
     videos the same as pi-files'. gone: videos that were deleted on purpose, so they're
-    taken off the TVs without being backed up."""
+    taken off the TVs without being backed up (they're noted on pi-files, for TVs that are
+    off now)."""
     get_ffmpeg = Ffmpeg(settings)
-    gone = set(gone)
     folders = sorted({tv for n in numbers for tv in art_tvs(n)})
     shrines: dict[int, list[ArtFolder]] = {}
     with on_pi_files(server):
+        deleted = server.deleted()
+        gone = set(gone) | deleted
         for tv in folders:
             for said in server.tidy(tv):
                 ui.info(said)
             shrines[tv] = server.shrines(tv)
         _say_unreadable(server)
-        for tv in folders:
-            for art in shrines[tv]:
-                try:
+    for tv in folders:
+        for art in shrines[tv]:
+            try:
+                with on_pi_files(server):
                     gone |= make_videos(server, art, get_ffmpeg)
-                except (shrine.ShrineError, ffmpeg.FfmpegError) as e:
-                    ui.error(f"{art.folder}: couldn't make its videos ({e}).")
+            except (shrine.ShrineError, ffmpeg.FfmpegError, ArtError) as e:
+                ui.error(f"{art.folder}: couldn't make its videos ({e}).")
+    with on_pi_files(server):
         playing = {tv: _videos_for(server, shrines[tv]) for tv in folders}
+        shown = {f for videos in playing.values() for f in videos}
+        if gone - shown != deleted:
+            server.note_deleted(gone - shown)
     with connected(settings, numbers) as tvs:
         for number, tv in sorted(tvs.items()):
             wanted: dict[str, tuple[str, int]] = {}
             for folder in art_tvs(number):
                 for file_name, source in playing[folder].items():
-                    wanted.setdefault(file_name, source)
+                    if file_name in wanted:
+                        ui.warning(f"{tv.name}: {source[0]} has the same name as "
+                                   f"{wanted[file_name][0]}, so it isn't shown.")
+                    else:
+                        wanted[file_name] = source
             try:
                 _sync(tv, server, wanted, gone)
             except (TvError, ArtError, OSError, paramiko.SSHException) as e:
@@ -714,6 +748,23 @@ def _gather(ffmpeg_path: Path, source: str, work: Path, downloads: Path) -> list
     return found
 
 
+_PICTURE_TYPES = {"JPEG": ".jpg", "MPO": ".jpg", "PNG": ".png", "GIF": ".gif", "WEBP": ".webp",
+                  "BMP": ".bmp", "TIFF": ".tif", "AVIF": ".avif"}
+
+
+def _label(media: shrine.Media) -> str:
+    """Where it came from, with a picture's type on the end if its name doesn't have it
+    (e.g. a download called 'photo.jpg_large'), so pi-files' name says it's a picture."""
+    if media.kind == shrine.VIDEO or is_picture(media.label):
+        return media.label
+    try:
+        with Image.open(media.path) as image:
+            ext = _PICTURE_TYPES.get(image.format or "", ".png")
+    except Exception:  # noqa: BLE001 (it was read before, so this shouldn't happen)
+        return media.label
+    return posixpath.splitext(media.label)[0] + ext
+
+
 def open_file(path: Path) -> None:
     """Open a file in the app Windows uses for it (e.g. Photos)."""
     try:
@@ -759,11 +810,11 @@ def make_shrine(settings: TvsSettings) -> None:
         if asked is None:
             return
         (title,) = asked
-        with tempfile.TemporaryDirectory(prefix="shrine-") as work:
+        with tempfile.TemporaryDirectory(prefix="shrine-", ignore_cleanup_errors=True) as work:
             media = _ask_for_media(get_ffmpeg(), Path(work))
             if media is None or (not media and title is None):
                 return
-            files = [(m.path, m.label) for m in media]
+            files = [(m.path, _label(m)) for m in media]
             if title is not None:
                 card = Path(work) / f"{name}.a.title.png"
                 shrine.title_card(title).save(card)
@@ -801,17 +852,17 @@ def _add_to(settings: TvsSettings, server: ArtServer, art: ArtFolder,
     with on_pi_files(server):
         existing = {posixpath.basename(p): size for p, size in server.art_files(art).items()}
     ui.info(f"{art.folder} has {len(existing)} piece(s) of art on pi-files (TV {art.tv}).")
-    with tempfile.TemporaryDirectory(prefix="shrine-") as work:
+    with tempfile.TemporaryDirectory(prefix="shrine-", ignore_cleanup_errors=True) as work:
         media = _ask_for_media(get_ffmpeg(), Path(work))
         if not media:
             return
         stems = {posixpath.splitext(f)[0].lower(): f for f in existing}
         new, same_name = [], []
         for m in media:
-            natural = stored_name(name, m.label, set())
+            natural = stored_name(name, _label(m), set())
             old = stems.get(posixpath.splitext(natural)[0].lower())
             if old is None:
-                new.append((m.path, m.label))
+                new.append((m.path, _label(m)))
             elif old == natural and existing[old] == m.path.stat().st_size:
                 ui.info(f"Already on pi-files: {m.label}")
             else:
@@ -828,12 +879,17 @@ def _add_to(settings: TvsSettings, server: ArtServer, art: ArtFolder,
                 return
         with on_pi_files(server):
             for m, old in same_name:
-                if replace:
-                    server.set_aside(posixpath.join(art.path, old), old)
-                    server.upload(m.path, posixpath.join(art.path, stored_name(name, m.label,
-                                                                               set())))
-                else:
-                    new.append((m.path, m.label))
+                if not replace:
+                    new.append((m.path, _label(m)))
+                    continue
+                old_path = posixpath.join(art.path, old)
+                aside = server.set_aside(old_path, old)
+                try:
+                    server.upload(m.path, posixpath.join(art.path,
+                                                         stored_name(name, _label(m), set())))
+                except BaseException:  # Ctrl+C too: never leave the shrine without either
+                    server.put_back(aside, old_path)
+                    raise
             if new:
                 _copy_to(server, art, new, set(existing))
     if new or (same_name and replace):

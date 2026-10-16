@@ -208,7 +208,8 @@ class PiConnection:
         directory, name = posixpath.split(remote_path)
         partial = posixpath.join(directory, f".{name}.part")
         try:
-            size = fileobj.seek(0, 2)  # so progress knows the total
+            fileobj.seek(0, 2)  # so progress knows the total
+            size = fileobj.tell()
             fileobj.seek(0)
             self.sftp.putfo(fileobj, partial, file_size=size, callback=progress)
             self.sftp.posix_rename(partial, remote_path)
