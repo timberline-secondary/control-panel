@@ -87,7 +87,7 @@ def test_menus_are_numbered_with_q_to_quit(typed, capsys):
     prompts = typed("1")
     assert ui.choose(["a", "b", ui.choice("Back", ui.BACK)], "Pick one") == "a"
     shown = capsys.readouterr().out
-    assert shown == "Pick one\n  1. a\n  2. b\n\n\n"  # Back isn't listed: q does it
+    assert shown == "\nPick one\n  1. a\n  2. b\n\n"  # Back isn't listed: q does it
     assert prompts == ["Choose an item or (q)uit: "]
 
 
@@ -120,8 +120,20 @@ def test_a_panel_clears_shows_its_heading_and_waits_after_each_task(typed, capsy
     assert len(cleared) == 2  # on the way in, and coming back after the task
     shown = capsys.readouterr().out
     assert shown.count("TV ART SHRINES") == 2
-    assert "Turn TVs off\n\n" in shown  # what was chosen, before its questions
-    assert prompts == ["Choose an item or (q)uit: ", "\nPress Enter to go back.",
+    assert "\nTurn TVs off\n" in shown  # what was chosen, before its questions
+    assert prompts == ["Choose an item or (q)uit: ", "Press Enter to go back.",
+                       "Choose an item or (q)uit: "]
+
+
+def test_every_question_has_a_blank_line_before_it(typed, capsys):
+    prompts = typed("x", "y", "1")
+    ui.info("  Getting a.png [####] 100%")
+    ui.ask("Type something")
+    ui.confirm("Delete it?")
+    ui.choose(["a"], "Which one?")
+    # (input() shows the questions themselves; each comes after a blank line)
+    assert capsys.readouterr().out == "  Getting a.png [####] 100%\n\n\n\nWhich one?\n  1. a\n\n"
+    assert prompts == ["Type something, or (q)uit: ", "Delete it? (Y/n): ",
                        "Choose an item or (q)uit: "]
 
 

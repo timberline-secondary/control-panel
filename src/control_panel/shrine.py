@@ -561,6 +561,37 @@ def make_slideshow(ffmpeg_path: Path, pictures: list[Media], output: Path, work_
     return problems
 
 
+TV_FORMAT = "1080p H.264 without sound"
+
+
+def tv_problems(path: Path, probe: ffmpeg.Probe) -> list[str]:
+    """What's stopping a video playing on the TVs as it is, e.g. ['it's 3840x2160', 'it has
+    sound']. Nothing if it's ready: an H.264 mp4 of at most 1920x1080 and 30 fps."""
+    problems = []
+    if path.suffix.lower() not in (".mp4", ".m4v"):
+        problems.append(f"it's a {path.suffix.lower() or 'video'} file")
+    if probe.codec != "h264":
+        problems.append(f"it's {probe.codec.upper() or 'an unknown kind of video'}")
+    if probe.size and (probe.size[0] > WIDTH or probe.size[1] > HEIGHT):
+        problems.append(f"it's {probe.size[0]}x{probe.size[1]}")
+    if probe.fps and probe.fps > 30.5:
+        problems.append(f"it's {probe.fps:g} fps")
+    if probe.pixels and probe.pixels != "yuv420p":
+        problems.append(f"its colours are stored as {probe.pixels}")
+    if probe.has_sound:
+        problems.append("it has sound")
+    return problems
+
+
+def remove_sound(ffmpeg_path: Path, source: Path, output: Path,
+                 update: Callable[[float], None]) -> None:
+    """Copy a video that's otherwise ready for the TVs without its sound (quick: the
+    picture isn't made again)."""
+    ffmpeg.run(ffmpeg_path, ["-i", str(source), "-map", "0:v:0", "-c:v", "copy", "-an", "-sn",
+                             "-dn", "-map_metadata", "-1", "-movflags", "+faststart",
+                             str(output)], progress=update)
+
+
 def convert(ffmpeg_path: Path, item: Media, output: Path, work_dir: Path,
             update: Callable[[float], None]) -> None:
     """Make a video or animation into a video the TVs can play."""

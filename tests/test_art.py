@@ -92,11 +92,30 @@ def test_video_names():
     assert art.video_name(paths[1], paths, "ann.lee") == "ann.lee.z.clip-gif.mp4"
     assert art.video_name("/a/My Film.MOV", ["/a/My Film.MOV"], "ann.lee") == \
         "ann.lee.z.my_film.mp4"
+    # hightower's names are kept exactly, so they match the videos already on the TVs.
+    for kept in ["aidan.lanoville.z.Sonic_Barrel_Title", "cole.knudsen.z.hth.0.dev"]:
+        name = kept.split(".z.")[0]
+        assert art.video_name(f"/a/{kept}.mp4", [f"/a/{kept}.mp4"], name) == f"{kept}.mp4"
+    assert art.video_name("/a/ben.b.z.Lego Animation.avi", [], "ben.b") == \
+        "ben.b.z.Lego_Animation.mp4"
 
 
 def test_stored_names_dont_share_a_piece_name():
     taken = {"ann.lee.z.clip.mov"}
     assert art.stored_name("ann.lee", "clip.gif", taken) == "ann.lee.z.clip-2.gif"
+
+
+@pytest.mark.parametrize("name", ["a.jpe", "a.JFIF", "a.pjpeg", "a.avif", "a.png"])
+def test_picture_types(name):
+    assert art.is_picture(name) and art.is_art(name)
+
+
+def test_copy_on_pi_files():
+    server, connection = make_server()
+    connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.clip.mp4", b"clip")
+    server.copy("/mnt/ssd/tv1/ann.lee/ann.lee.z.clip.mp4",
+                "/mnt/ssd/tv1/ann.lee/.videos/ann.lee.z.clip.mp4")
+    assert connection.files["/mnt/ssd/tv1/ann.lee/.videos/ann.lee.z.clip.mp4"] == b"clip"
 
 
 def test_shrines_and_find():
@@ -128,15 +147,19 @@ def test_tidy_puts_hightowers_loose_files_where_they_go():
     connection.add("/mnt/ssd/tv1/ann.lee.a.mp4", b"old slideshow")
     connection.add("/mnt/ssd/tv1/ann.lee.z.clip.mp4", b"clip")
     connection.add("/mnt/ssd/tv1/bo.ng.z.dance.mov", b"dance")  # no folder yet
-    connection.add("/mnt/ssd/tv1/robot_demo.mp4", b"demo")
+    connection.add("/mnt/ssd/tv1/0_RubeGoldberg-Webb.mp4", b"demo")  # nobody's: it plays
+    connection.add("/mnt/ssd/tv1/organize_images.py", b"hightower's script")
+    connection.add("/mnt/ssd/tv1/odd.mov", b"?")
     said = server.tidy(1)
     assert connection.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.clip.mp4"] == b"clip"
     assert connection.files["/mnt/ssd/tv1/bo.ng/bo.ng.z.dance.mov"] == b"dance"
-    assert "/mnt/ssd/tv1/robot_demo.mp4" in connection.files  # left, and said so
+    assert "/mnt/ssd/tv1/0_RubeGoldberg-Webb.mp4" in connection.files
     backup = connection.list_folder("/mnt/ssd/backup")[1]
     assert [f.endswith("-tv1-ann.lee.a.mp4") for f in backup] == [True]
-    assert any("robot_demo.mp4 isn't in a shrine's folder" in s for s in said)
+    assert not any("organize_images" in s or "RubeGoldberg" in s for s in said)  # quietly
+    assert any("odd.mov isn't in a shrine's folder" in s for s in said)
     assert server.tidy(1) == [said[-1]]  # only the one it can't place is left
+    assert server.loose_videos(1) == {"0_RubeGoldberg-Webb.mp4": 4}
 
 
 def test_a_locked_folder_is_explained(tmp_path):

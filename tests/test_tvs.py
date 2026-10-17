@@ -386,7 +386,7 @@ def _rendered(server, path, data):
 
 
 def test_sync_copies_whats_missing_and_backs_up_what_isnt_on_pi_files(monkeypatch, pi_files):
-    screen = Screen(monkeypatch, confirms=[True])
+    screen = Screen(monkeypatch, chooses=["backup"])
     tv, connection = make_tv(files={"ann.lee.a.mp4": b"old", "same.mp4": b"same",
                                     "stray.mp4": b"stray", "deleted.mp4": b"gone"})
     pi_files.connection.add("/v/ann.lee.a.mp4", b"new slideshow")
@@ -394,27 +394,28 @@ def test_sync_copies_whats_missing_and_backs_up_what_isnt_on_pi_files(monkeypatc
     pi_files.connection.add("/v/bo.ng.a.mp4", b"bo")
     wanted = {"ann.lee.a.mp4": ("/v/ann.lee.a.mp4", 13), "same.mp4": ("/v/same.mp4", 4),
               "bo.ng.a.mp4": ("/v/bo.ng.a.mp4", 2)}
-    tvs._sync(tv, pi_files, wanted, gone={"deleted.mp4"})
+    tvs._sync(tv, pi_files, wanted, {"deleted.mp4"}, {})
     assert connection.files == {"ann.lee.a.mp4": b"new slideshow", "same.mp4": b"same",
                                 "bo.ng.a.mp4": b"bo"}
     backup = pi_files.connection.list_folder("/mnt/ssd/backup")[1]
     assert len(backup) == 1 and next(iter(backup)).endswith("-tv1-stray.mp4")  # only it
-    assert "stray.mp4" in screen.shown("info") and "deleted.mp4" not in screen.questions[0]
+    assert "  stray.mp4 (" in screen.shown("info")  # listed, unlike deleted.mp4
+    assert "  deleted.mp4 (" not in screen.shown("info")
     assert ("systemctl restart rs", True) in connection.commands
     screen.finished()
 
 
 def test_sync_leaves_unknown_videos_if_asked_to(monkeypatch, pi_files):
-    Screen(monkeypatch, confirms=[False])
+    Screen(monkeypatch, chooses=["leave"])
     tv, connection = make_tv(files={"stray.mp4": b"stray"})
-    tvs._sync(tv, pi_files, {}, gone=set())
+    tvs._sync(tv, pi_files, {}, set(), {})
     assert connection.files == {"stray.mp4": b"stray"}
 
 
 def test_sync_says_when_theres_nothing_to_do(monkeypatch, pi_files):
     screen = Screen(monkeypatch)
     tv, connection = make_tv(files={"a.mp4": b"a"})
-    tvs._sync(tv, pi_files, {"a.mp4": ("/v/a.mp4", 1)}, gone=set())
+    tvs._sync(tv, pi_files, {"a.mp4": ("/v/a.mp4", 1)}, set(), {})
     assert screen.shown("success") == "TV 1: up to date (1 videos)."
     assert not any("restart" in command for command, _ in connection.commands)
 
@@ -424,7 +425,7 @@ def test_sync_checks_theres_room(monkeypatch, pi_files):
     tv, connection = make_tv(room=tvs.SPARE_SPACE + 5)
     pi_files.connection.add("/v/big.mp4", b"x" * 10)
     with pytest.raises(TvError, match="needs"):
-        tvs._sync(tv, pi_files, {"big.mp4": ("/v/big.mp4", 10)}, gone=set())
+        tvs._sync(tv, pi_files, {"big.mp4": ("/v/big.mp4", 10)}, set(), {})
     assert connection.files == {}
 
 
@@ -497,8 +498,8 @@ def test_add_art_skips_whats_there_and_replaces_same_names(tmp_path, monkeypatch
     _picture(new / "sun.png", "blue")  # the same name, a new version
     _picture(new / "moon.png", "white")
     updated = []
-    monkeypatch.setattr(tvs, "update_tvs", lambda settings, server, numbers, gone=():
-                        updated.append(numbers))
+    monkeypatch.setattr(tvs, "update_shrine", lambda settings, server, art, **k:
+                        updated.append(art))
     screen = Screen(monkeypatch, asks=["ann", str(new), ""], chooses=[ANN], confirms=[True])
     tvs.add_art(TvsSettings(ffmpeg=str(ffmpeg_path)))
     screen.finished()
@@ -508,7 +509,7 @@ def test_add_art_skips_whats_there_and_replaces_same_names(tmp_path, monkeypatch
     backup = files.list_folder("/mnt/ssd/backup")[1]
     assert [f.endswith("-ann.lee.z.sun.png") for f in backup] == [True]
     assert "Already on pi-files: red.jpg" in screen.shown("info")
-    assert updated == [[1, 4]]
+    assert updated == [ANN]
 
 
 def test_add_art_can_keep_both(tmp_path, monkeypatch, ffmpeg_path, pi_files):
@@ -516,7 +517,7 @@ def test_add_art_can_keep_both(tmp_path, monkeypatch, ffmpeg_path, pi_files):
     new = tmp_path / "new"
     new.mkdir()
     _picture(new / "sun.png", "blue")
-    monkeypatch.setattr(tvs, "update_tvs", lambda *a, **k: None)
+    monkeypatch.setattr(tvs, "update_shrine", lambda *a, **k: None)
     Screen(monkeypatch, asks=["ann", str(new), ""], chooses=[ANN], confirms=[False])
     tvs.add_art(TvsSettings(ffmpeg=str(ffmpeg_path)))
     assert sorted(pi_files.connection.list_folder("/mnt/ssd/tv1/ann.lee")[1]) == [
@@ -528,8 +529,8 @@ def test_see_a_piece_then_delete_it(tmp_path, monkeypatch, pi_files):
     opened = []
     monkeypatch.setattr(tvs, "open_file", lambda path: opened.append(path.read_bytes()))
     updated = []
-    monkeypatch.setattr(tvs, "update_tvs", lambda settings, server, numbers, gone=():
-                        updated.append(numbers))
+    monkeypatch.setattr(tvs, "update_shrine", lambda settings, server, art, **k:
+                        updated.append(art))
     red = "/mnt/ssd/tv1/ann.lee/ann.lee.z.red.jpg"
     blue = "/mnt/ssd/tv1/ann.lee/ann.lee.z.blue.png"
     screen = Screen(monkeypatch, asks=["ann"], chooses=[ANN, blue, red, None],
@@ -540,14 +541,14 @@ def test_see_a_piece_then_delete_it(tmp_path, monkeypatch, pi_files):
     assert red not in files.files and blue in files.files
     assert [f.endswith("-ann.lee.z.red.jpg") for f in files.list_folder("/mnt/ssd/backup")[1]] \
         == [True]
-    assert updated == [[1, 4]]  # the slideshow's made again, and the TVs updated
+    assert updated == [ANN]  # the slideshow's made again, and its TVs updated
 
 
 def test_looking_without_deleting_changes_nothing(tmp_path, monkeypatch, pi_files):
     files = _shrine_on_pi_files(pi_files, tmp_path)
     before = dict(files.files)
     monkeypatch.setattr(tvs, "open_file", lambda path: None)
-    monkeypatch.setattr(tvs, "update_tvs", lambda *a, **k: pytest.fail("updated the TVs"))
+    monkeypatch.setattr(tvs, "update_shrine", lambda *a, **k: pytest.fail("updated the TVs"))
     Screen(monkeypatch, asks=["ann"], chooses=[ANN, "/mnt/ssd/tv1/ann.lee/ann.lee.z.red.jpg",
                                                None], confirms=[False])
     tvs.view_art(TvsSettings())
@@ -576,7 +577,7 @@ def test_remove_a_shrine(monkeypatch, pi_files, the_tvs, how, kept):
 
 def test_update_the_tvs(monkeypatch, pi_files):
     updated = []
-    monkeypatch.setattr(tvs, "update_tvs", lambda settings, server, numbers, gone=():
+    monkeypatch.setattr(tvs, "update_tvs", lambda settings, server, numbers:
                         updated.append(numbers))
     Screen(monkeypatch, picks=[[2, 3]])
     tvs.update(TvsSettings())
@@ -679,13 +680,14 @@ def test_a_replace_that_fails_puts_the_old_piece_back(tmp_path, monkeypatch, ffm
 
 def test_videos_deleted_while_a_tv_is_off_come_off_it_later(monkeypatch, pi_files, the_tvs):
     _rendered(pi_files, "/mnt/ssd/tv1/ann.lee/.videos/ann.lee.a.mp4", b"ann")
-    pi_files.connection.add("/mnt/ssd/tv1/bo.ng/bo.ng.z.a.jpg")
+    _rendered(pi_files, "/mnt/ssd/tv1/bo.ng/.videos/bo.ng.a.mp4", b"bo")
     monkeypatch.setattr(tvs, "make_videos", lambda server, art, get: set())
     the_tvs[4].files = {"ann.lee.a.mp4": b"ann", "bo.ng.a.mp4": b"bo"}
     real_connect = tvs.connect
-    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {})  # TV 4 is off
-    Screen(monkeypatch)
-    tvs.update_tvs(TvsSettings(), pi_files, [4], gone={"bo.ng.a.mp4"})
+    monkeypatch.setattr(tvs, "connect", lambda settings, numbers: {})  # the TVs are off
+    Screen(monkeypatch, asks=["bo.ng"], chooses=[ArtFolder(1, "/mnt/ssd/tv1/bo.ng", "bo.ng"),
+                                                "backup"])
+    tvs.remove_shrine(TvsSettings())
     assert pi_files.deleted() == {"bo.ng.a.mp4"}
     monkeypatch.setattr(tvs, "connect", real_connect)
     screen = Screen(monkeypatch)  # no question about backing it up
@@ -697,9 +699,128 @@ def test_videos_deleted_while_a_tv_is_off_come_off_it_later(monkeypatch, pi_file
 def test_the_same_video_in_two_tv_folders_is_shown_once(monkeypatch, pi_files, the_tvs):
     screen = Screen(monkeypatch)
     _rendered(pi_files, "/mnt/ssd/tv3/skills/.videos/skills.a.mp4", b"tv3's")
-    _rendered(pi_files, "/mnt/ssd/tv4/skills/.videos/skills.a.mp4", b"tv4's")
+    _rendered(pi_files, "/mnt/ssd/tv4/skills/.videos/skills.a.mp4", b"tv4's, a different one")
     monkeypatch.setattr(tvs, "make_videos", lambda server, art, get: set())
     tvs.update_tvs(TvsSettings(), pi_files, [4])
     assert the_tvs[4].files == {"skills.a.mp4": b"tv3's"}
     assert "has the same name as /mnt/ssd/tv3/skills/.videos/skills.a.mp4" in \
         screen.shown("warning")
+
+
+# --- Tweaks from trying it on the real Pis -------------------------------------------------
+
+def _clip(ffmpeg_path, path, size="64x48", rate=25, codec="libx264", sound=False):
+    args = ["-f", "lavfi", "-i", f"color=c=green:s={size}:d=1:r={rate}"]
+    if sound:
+        args += ["-f", "lavfi", "-i", "sine=d=1", "-shortest", "-c:a", "aac"]
+    ffmpeg.run(ffmpeg_path, [*args, "-pix_fmt", "yuv420p", "-c:v", codec, str(path)])
+    return path.read_bytes()
+
+
+def test_a_video_already_in_the_tvs_format_is_used_as_it_is(tmp_path, monkeypatch, ffmpeg_path,
+                                                           pi_files):
+    screen = Screen(monkeypatch)
+    ready = _clip(ffmpeg_path, tmp_path / "ready.mp4")
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.Stories_of_Ribbecca.mp4", ready)
+    monkeypatch.setattr(shrine, "convert", lambda *a: pytest.fail("converted it"))
+    tvs.make_videos(pi_files, ANN, tvs.Ffmpeg(TvsSettings(ffmpeg=str(ffmpeg_path))))
+    # The same file, under the same name (capitals and all), as hightower's TVs have it.
+    assert pi_files.connection.files[
+        "/mnt/ssd/tv1/ann.lee/.videos/ann.lee.z.Stories_of_Ribbecca.mp4"] == ready
+    assert "is already in the TVs' format, so it's used as it is" in screen.shown("info")
+
+
+def test_only_the_sound_is_taken_out_of_an_otherwise_ready_video(tmp_path, monkeypatch,
+                                                                 ffmpeg_path, pi_files):
+    Screen(monkeypatch)
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.talk.mp4",
+                            _clip(ffmpeg_path, tmp_path / "talk.mp4", sound=True))
+    monkeypatch.setattr(shrine, "convert", lambda *a: pytest.fail("converted it"))
+    tvs.make_videos(pi_files, ANN, tvs.Ffmpeg(TvsSettings(ffmpeg=str(ffmpeg_path))))
+    made = tmp_path / "made.mp4"
+    made.write_bytes(pi_files.connection.files["/mnt/ssd/tv1/ann.lee/.videos/ann.lee.z.talk.mp4"])
+    assert not ffmpeg.probe(ffmpeg_path, made).has_sound
+
+
+def test_converting_says_why(tmp_path, monkeypatch, ffmpeg_path, pi_files):
+    screen = Screen(monkeypatch)
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.fast.mov",
+                            _clip(ffmpeg_path, tmp_path / "fast.mov", rate=60))
+    tvs.make_videos(pi_files, ANN, tvs.Ffmpeg(TvsSettings(ffmpeg=str(ffmpeg_path))))
+    assert "Converting ann.lee.z.fast.mov for the TVs: it's a .mov file, it's 60 fps, and the " \
+        "TVs need 1080p H.264 without sound." in screen.shown("info")
+    assert videos_on(pi_files) == ["ann.lee.z.fast.mp4"]
+
+
+def test_the_slideshow_message_explains_animations(tmp_path, monkeypatch, ffmpeg_path,
+                                                   pi_files):
+    screen = Screen(monkeypatch)
+    _shrine_on_pi_files(pi_files, tmp_path)
+    tvs.make_videos(pi_files, ANN, tvs.Ffmpeg(TvsSettings(ffmpeg=str(ffmpeg_path))))
+    assert "Making ann.lee's slideshow (title card and 2 pictures)..." in screen.shown("info")
+    assert "ann.lee.z.spin.gif is an animation, so it plays as its own video." in \
+        screen.shown("info")
+
+
+def test_jpe_pictures_go_in_the_slideshow(tmp_path, monkeypatch, ffmpeg_path, pi_files):
+    Screen(monkeypatch)
+    pi_files.connection.add("/mnt/ssd/tv1/ann.lee/9923251.z.WonkyDonkey.jpe",
+                            _picture(tmp_path / "w.jpg", "red"))
+    tvs.make_videos(pi_files, ANN, tvs.Ffmpeg(TvsSettings(ffmpeg=str(ffmpeg_path))))
+    assert videos_on(pi_files) == ["ann.lee.a.mp4"]
+
+
+def test_changing_one_shrine_only_updates_it(monkeypatch, pi_files, the_tvs):
+    screen = Screen(monkeypatch)
+    _rendered(pi_files, "/mnt/ssd/tv1/ann.lee/.videos/ann.lee.a.mp4", b"new slideshow")
+    pi_files.connection.add("/mnt/ssd/tv1/bo.ng.z.loose.mp4", b"hightower's")  # not tidied
+    monkeypatch.setattr(tvs, "make_videos", lambda server, art, get: {"ann.lee.z.old.mp4"})
+    for number in (1, 4):
+        the_tvs[number].files = {"ann.lee.a.mp4": b"old", "ann.lee.z.old.mp4": b"gone",
+                                 "someone.else.a.mp4": b"theirs"}
+    tvs.update_shrine(TvsSettings(), pi_files, ANN)
+    screen.finished()  # no questions about other shrines' videos
+    for number in (1, 4):
+        assert the_tvs[number].files == {"ann.lee.a.mp4": b"new slideshow",
+                                         "someone.else.a.mp4": b"theirs"}
+    assert the_tvs[2].files == {} and the_tvs[3].files == {}
+    assert "/mnt/ssd/tv1/bo.ng.z.loose.mp4" in pi_files.connection.files
+    assert "Updating TV 1 and TV 4 (the hallway):" in screen.shown("info")
+    assert "isn't in a shrine's folder" not in screen.shown()
+
+
+def test_loose_videos_in_a_tv_folder_play_as_they_are(monkeypatch, pi_files, the_tvs):
+    Screen(monkeypatch)
+    pi_files.connection.add("/mnt/ssd/tv3/0_RubeGoldberg-Webb.mp4", b"demo")
+    pi_files.connection.add("/mnt/ssd/tv4/0_RubeGoldberg-Webb.mp4", b"demo")  # a copy
+    pi_files.connection.add("/mnt/ssd/tv3/organize_images.py", b"hightower's script")
+    tvs.update_tvs(TvsSettings(), pi_files, [3, 4])
+    assert the_tvs[3].files == {"0_RubeGoldberg-Webb.mp4": b"demo"}
+    assert the_tvs[4].files == {"0_RubeGoldberg-Webb.mp4": b"demo"}
+
+
+def test_videos_only_on_a_tv_can_be_added_to_pi_files(monkeypatch, pi_files):
+    screen = Screen(monkeypatch, chooses=["add"])
+    tv, connection = make_tv(files={"ann.lee.z.Sonic.mp4": b"sonic", "new.kid.a.mp4": b"kid",
+                                    "robot_demo.mp4": b"robot"})
+    tvs._sync(tv, pi_files, {}, set(), {"ann.lee": ANN})
+    files = pi_files.connection.files
+    assert files["/mnt/ssd/tv1/ann.lee/ann.lee.z.Sonic.mp4"] == b"sonic"  # its shrine
+    assert files["/mnt/ssd/tv1/new.kid/new.kid.a.mp4"] == b"kid"  # a new one, on this TV
+    assert files["/mnt/ssd/tv1/robot_demo.mp4"] == b"robot"  # nobody's: loose
+    assert set(connection.files) == {"ann.lee.z.Sonic.mp4", "new.kid.a.mp4", "robot_demo.mp4"}
+    assert "TV 1: added ann.lee.z.Sonic.mp4 to /mnt/ssd/tv1/ann.lee on pi-files." in \
+        screen.shown("info")
+
+
+def test_a_dropped_connection_is_tried_again(monkeypatch, the_tvs):
+    screen = Screen(monkeypatch)
+    tries = []
+
+    def flaky(tv):
+        tries.append(tv)
+        if len(tries) == 1:
+            raise ConnectionResetError(10054, "An existing connection was forcibly closed")
+    assert tvs._on_tv(TvsSettings(), 1, flaky)
+    assert len(tries) == 2
+    assert "Lost the connection to TV 1; trying again..." in screen.shown("warning")

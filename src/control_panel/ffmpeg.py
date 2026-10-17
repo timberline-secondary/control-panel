@@ -175,6 +175,11 @@ class Probe:
 
     has_video: bool  # a moving picture (not just an mp3's cover art)
     duration: float | None  # seconds, if it says
+    codec: str = ""  # of its video, e.g. h264 or hevc
+    size: tuple[int, int] | None = None
+    fps: float | None = None
+    pixels: str = ""  # how its colours are stored, e.g. yuv420p
+    has_sound: bool = False
 
 
 _DURATION = re.compile(r"Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)")
@@ -190,11 +195,21 @@ def probe(ffmpeg: Path, path: Path) -> Probe:
         )
     except (OSError, subprocess.SubprocessError) as e:
         raise FfmpegError(f"Couldn't run ffmpeg: {e}") from e
-    has_video = any("(attached pic)" not in line
-                    for line in _VIDEO_STREAM.findall(result.stderr))
+    videos = [line for line in _VIDEO_STREAM.findall(result.stderr)
+              if "(attached pic)" not in line]
     match = _DURATION.search(result.stderr)
     duration = (int(match[1]) * 3600 + int(match[2]) * 60 + float(match[3])) if match else None
-    return Probe(has_video, duration)
+    if not videos:
+        return Probe(False, duration)
+    video = videos[0]
+    codec = re.search(r"Video: (\w+)", video)
+    pixels = re.search(r"Video: [^,]*, (\w+)", video)
+    size = re.search(r", (\d{2,5})x(\d{2,5})", video)
+    fps = re.search(r", ([\d.]+) fps", video)
+    return Probe(True, duration, codec[1] if codec else "",
+                 (int(size[1]), int(size[2])) if size else None,
+                 float(fps[1]) if fps else None, pixels[1] if pixels else "",
+                 bool(re.search(r"Stream #.*: Audio: ", result.stderr)))
 
 
 def run(ffmpeg: Path, args: list[str], *, seconds: float | None = None,

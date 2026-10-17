@@ -48,6 +48,10 @@ class FakeFilesConnection:
             return CommandResult(0, "".join(
                 f"{'d' if p in self.dirs else 'f'}\t{len(self.files.get(p, b''))}\t"
                 f"{posixpath.basename(p)}\n" for p in sorted(inside)))
+        if command.startswith("cp -- "):
+            source, target = shlex.split(command)[2:]
+            self.files[target] = self.files[source]
+            return CommandResult(0, "")
         if command.startswith("rm -rf -- "):
             gone = shlex.split(command)[-1]
             self.dirs = {d for d in self.dirs if d != gone and not d.startswith(gone + "/")}
