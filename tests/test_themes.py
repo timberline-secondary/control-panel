@@ -203,6 +203,15 @@ class FakeConnection:
     def upload(self, fileobj, path):
         self.files[path] = fileobj.read()
 
+    def mkdir(self, path):
+        pass
+
+    def rename(self, old, new):
+        self.files[new] = self.files.pop(old)
+
+    def remove(self, path):
+        del self.files[path]
+
     def start(self, command):
         self.commands.append((command, False))
 
@@ -369,6 +378,62 @@ def test_add_theme_can_always_be_left(add_screen, asks, chooses):
     assert files == {"/mnt/usb0/0027.mp3": b""}
 
 
+@pytest.fixture
+def remove_screen(monkeypatch):
+    """Runs 'Remove a theme' with scripted answers. Returns (run, files, messages)."""
+    pi, connection = make_pi(files=["0027.mp3", "0042.mp3"])
+    connection.files["/mnt/usb0/0027.mp3"] = ID3_MP3
+    messages = []
+    for kind in ["success", "info", "warning", "error"]:
+        monkeypatch.setattr(themes.ui, kind, lambda text, kind=kind: messages.append(text))
+
+    def run(asks, chooses=()):
+        asks, chooses = iter(asks), iter(chooses)
+        monkeypatch.setattr(themes.ui, "ask", lambda prompt, **k: next(asks))
+        monkeypatch.setattr(themes.ui, "choose", lambda *a, **k: next(chooses))
+        themes.remove_theme(pi)
+        for left in (asks, chooses):  # every scripted answer was asked for
+            assert next(left, "done") == "done"
+
+    return run, connection.files, messages
+
+
+def test_remove_a_theme_keeping_a_backup(remove_screen):
+    run, files, messages = remove_screen
+    run(asks=["0027"], chooses=["backup"])
+    assert files == {"/mnt/usb0/removed/0027.mp3": ID3_MP3, "/mnt/usb0/0042.mp3": b""}
+    assert messages == ["Removed theme 0027. Its backup is /mnt/usb0/removed/0027.mp3."]
+
+
+def test_removing_a_theme_again_keeps_both_backups(remove_screen):
+    run, files, messages = remove_screen
+    files["/mnt/usb0/removed/0027.mp3"] = b"older"
+    run(asks=["0027"], chooses=["backup"])
+    assert files["/mnt/usb0/removed/0027.mp3"] == b"older"
+    assert files["/mnt/usb0/removed/0027 (2).mp3"] == ID3_MP3
+
+
+def test_delete_a_theme_for_good(remove_screen):
+    run, files, messages = remove_screen
+    run(asks=["0027"], chooses=["delete"])
+    assert files == {"/mnt/usb0/0042.mp3": b""}
+    assert messages == ["Deleted theme 0027."]
+
+
+def test_remove_asks_again_for_a_code_that_isnt_there(remove_screen):
+    run, files, messages = remove_screen
+    run(asks=["9999", "../0027", "0042"], chooses=["delete"])
+    assert messages[0] == "There's no theme with code 9999. 'List and search themes' shows them."
+    assert "/mnt/usb0/0027.mp3" in files and "/mnt/usb0/0042.mp3" not in files
+
+
+@pytest.mark.parametrize("asks, chooses", [([None], []), (["0027"], [None])])
+def test_remove_can_be_left_without_removing_anything(remove_screen, asks, chooses):
+    run, files, messages = remove_screen
+    run(asks=asks, chooses=chooses)
+    assert set(files) == {"/mnt/usb0/0027.mp3", "/mnt/usb0/0042.mp3"}
+
+
 @pytest.mark.parametrize("level, expected", [(42, "0%"), (0, "100%")])
 def test_toggle_mute(monkeypatch, level, expected):
     pi, connection = make_pi()
@@ -380,8 +445,9 @@ def test_toggle_mute(monkeypatch, level, expected):
 
 def test_the_menu_is_in_the_asked_for_order():
     assert [title for title, _ in themes.ACTIONS] == [
-        "Add a new theme", "Play a theme", "List and search themes", "Toggle mute",
-        "Say something (text to speech)", "Reboot pi-themes", "pi-themes documentation"]
+        "Add a new theme", "Remove a theme", "Play a theme", "List and search themes",
+        "Toggle mute", "Say something (text to speech)", "Reboot pi-themes",
+        "pi-themes documentation"]
 
 
 def test_documentation_needs_no_login(monkeypatch, capsys):
