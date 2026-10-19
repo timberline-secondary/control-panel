@@ -111,6 +111,7 @@ drive. It's worth backing up the drive now and then.
 | Menu item | What it does |
 | --- | --- |
 | Add a new theme | From a link to an mp3, or an mp3 file dragged into the window. Checks that it really is an mp3, suggests the code from the file name. If the code is taken, you can use another code or replace that theme. |
+| Remove a theme | Type its code. Then either keep a backup on pi-themes (in `removed/` next to the themes, where the player can't play it), or delete it for good. |
 | Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. It runs its own copy of the player, so spam-block and admin (`*`) codes here don't affect the keypad. Leaving stops anything still playing. |
 | List and search themes | Shows every theme code on the Pi's USB drive, then type part of a code to see only the codes that contain it. |
 | Toggle mute | Mutes the speaker, or unmutes it if it's muted. |

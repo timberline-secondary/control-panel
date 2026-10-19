@@ -35,6 +35,7 @@ PLAYER_STARTUP_SECONDS = 30  # importing pygame on a Pi is slow
 PLAYER_READY = "Please enter a code:"  # themes.py prints this when it's waiting for a code
 _PLAYER_NOISE = (PLAYER_READY, "pygame ", "Hello from the pygame community")
 _CODE_PATTERN = re.compile(r"[0-9A-Za-z_-]+")
+REMOVED = "removed"  # the folder next to the themes that removed ones are kept in
 
 
 class ThemeError(Exception):
@@ -199,6 +200,25 @@ class ThemesPi:
     def add_theme(self, code: str, data: bytes) -> None:
         self.connection.upload(io.BytesIO(data), self.theme_path(code))
 
+    def removed_folder(self) -> str:
+        return posixpath.join(self.settings.songs_dir, REMOVED)
+
+    def remove_theme(self, code: str, keep_backup: bool) -> str | None:
+        """Take a theme off, so its code doesn't play anything. Returns where its backup is,
+        if one was kept (the player only plays themes in songs_dir itself)."""
+        path = self.theme_path(code)
+        if not keep_backup:
+            self.connection.remove(path)
+            return None
+        folder = self.removed_folder()
+        self.connection.mkdir(folder)
+        backup, copy = posixpath.join(folder, f"{code}.mp3"), 1
+        while self.connection.exists(backup):  # it was removed before
+            copy += 1
+            backup = posixpath.join(folder, f"{code} ({copy}).mp3")
+        self.connection.rename(path, backup)
+        return backup
+
     def speak(self, text: str) -> CommandResult:
         # "--" so text starting with "-" is spoken, not read as espeak options.
         # espeak only finishes once it's done talking, hence the long timeout.
@@ -355,6 +375,37 @@ def add_theme(pi: ThemesPi) -> None:
             return
 
 
+def remove_theme(pi: ThemesPi) -> None:
+    while True:
+        code = ui.ask("Type the code of the theme to remove")
+        if code is None:
+            return
+        if not code:
+            continue
+        if problem := code_problem(code):
+            ui.error(problem)
+        elif pi.has_theme(code):
+            break
+        else:
+            ui.error(f"There's no theme with code {code}. 'List and search themes' shows them.")
+    how = ui.choose([
+        ui.choice(f"Remove it, and keep a backup on pi-themes (in {pi.removed_folder()})",
+                  "backup"),
+        ui.choice("Delete it for good", "delete"),
+    ], f"Theme {code} won't play any more.")
+    if how is None:
+        return
+    try:
+        backup = pi.remove_theme(code, keep_backup=how == "backup")
+    except OSError as e:
+        ui.error(f"Couldn't remove it from pi-themes: {e}")
+        return
+    if backup:
+        ui.success(f"Removed theme {code}. Its backup is {backup}.")
+    else:
+        ui.success(f"Deleted theme {code}.")
+
+
 def _ask_code(suggestion: str | None) -> str | None:
     while True:
         code = ui.ask("What code should play it?", default=suggestion or "")
@@ -423,6 +474,7 @@ def docs() -> None:
 
 ACTIONS = [
     ("Add a new theme", add_theme),
+    ("Remove a theme", remove_theme),
     ("Play a theme", play),
     ("List and search themes", list_themes),
     ("Toggle mute", toggle_mute),
