@@ -26,7 +26,7 @@ and press Enter, or `q` to go back (or quit, from the main menu). Questions end 
 `, or (q)uit:`, and show what Enter does if it does something, like
 `Type their grad year (Enter = 2027), or (q)uit:`. Yes-or-no questions are `(Y/n)` or `(y/N)`,
 the capital letter being what Enter means. Where you can pick several TVs, type their numbers,
-like `1 4` or `2-3` or `all`. When a task is done, press Enter to go back to the panel.
+like `1 4` or `2-3` or `all`. When a task is done and has something to read, press Enter to go back to the panel (if its last step was a question, like `Add another theme? (Y/n)`, answering it goes straight back). In a menu that suggests an item, like the TV a shrine goes on, it shows `Choose an item (Enter = 2), or (q)uit:`.
 
 The first time you connect to a Pi you'll be asked for its password. If you're on your own
 Windows login (not a shared one), you can have Windows remember it in Credential Manager. The
@@ -63,7 +63,8 @@ sound) is used as it is, under the same name; others are converted, and the app 
 | --- | --- |
 | Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Pick its TV, then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). The student's own files are never moved or changed. |
 | Add art to a shrine | Type part of their username, then drag in or paste the new art. Art that's already there is skipped, so you can drag in their whole folder again; if some pieces have the same names as old ones, it asks whether to replace them (the old ones go to `backup`) or keep both. |
-| See, open or delete a shrine's art | Lists their art (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player); then you can delete it (it's moved to `backup`). |
+| List, View, and/or Delete a Shrine's Art | Search for a shrine by name, or list the shrines on a TV and pick one. Then it lists their art (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player); then you can delete it (it's moved to `backup`). |
+| Rename a shrine (e.g. to a different username) | Renames its folder on pi-files and its art and videos with it (`old.name.z.sun.jpg` becomes `new.name.z.sun.jpg`), so nothing is made again. It can move to another TV too (Enter keeps it where it is). If it has a title card, you can make a new one with the new name. Then its old videos come off the TVs and the renamed ones go on. |
 | Remove a shrine | Takes it off the TVs, and either moves its art to `backup` (so it can be put back) or deletes it for good. |
 | Update the TVs from pi-files | Checks every shrine the chosen TVs show: tidies hightower's loose files, makes any videos pi-files is missing (e.g. for art copied there by hand, or from hightower), then makes the TVs match. Videos on a TV that aren't on pi-files are listed, and you choose: add them to pi-files (each to its student's shrine, so they stay), back them up to pi-files and take them off, or leave them. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |

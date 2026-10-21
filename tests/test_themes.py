@@ -147,8 +147,10 @@ def test_read_mp3_link_to_web_page(monkeypatch):
 @pytest.mark.parametrize("line, expected", [
     ("Please enter a code:\r", None),
     ("> ", None),
-    ("> Found /mnt/usb0/0027.mp3\r", "Found /mnt/usb0/0027.mp3"),
-    ("File '9.mp3' not found.", "File '9.mp3' not found."),
+    ("> Found /mnt/usb0//0027.mp3\r", "Playing 0027."),
+    ("File '9.mp3' not found.", "There's no theme with code 9."),
+    ("ALSA lib pcm.c:8545:(snd_pcm_recover) underrun occurred", None),
+    ("Spam block is now set to 5", "Spam block is now set to 5"),
     ("pygame 2.1.0 (SDL 2.0.16, Python 3.9.2)", None),
     ("Hello from the pygame community. https://www.pygame.org/contribute.html", None),
 ])
@@ -298,7 +300,7 @@ def test_player_session_shows_tidy_output_and_sends_codes():
     session.stop()
 
     assert channel.sent == [b"0027\n"]
-    assert shown == ["Found /mnt/usb0/0027.mp3", "File 'x\u00e9.mp3' not found."]
+    assert shown == ["Playing 0027.", "There's no theme with code x\u00e9."]
     assert session.ended.is_set()
 
 
