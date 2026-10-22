@@ -144,8 +144,12 @@ def tidy_player_line(line: str) -> str | None:
     line = line.strip()
     while line.startswith(">"):  # its input prompt, which output gets appended to
         line = line[1:].lstrip()
-    if not line or line.startswith(_PLAYER_NOISE):
-        return None
+    if not line or line.startswith(_PLAYER_NOISE) or "underrun occurred" in line:
+        return None  # an underrun is a hiccup in the sound that it recovers from
+    if found := re.fullmatch(r"Found .*/(.+)\.mp3", line):
+        return f"Playing {found[1]}."
+    if missing := re.fullmatch(r"File '(.+)\.mp3' not found\.", line):
+        return f"There's no theme with code {missing[1]}."
     return line
 
 
@@ -299,7 +303,7 @@ class PlayerSession:
 def play(pi: ThemesPi) -> None:
     ui.info("Starting the theme player on pi-themes...")
     session = PlayerSession(
-        pi.start_player(), show=lambda line: print(f"  pi-themes: {line}", flush=True)
+        pi.start_player(), show=lambda line: ui.info(f"  pi-themes: {line}")
     )
     try:
         session.ready.wait(PLAYER_STARTUP_SECONDS)

@@ -328,7 +328,34 @@ def _say_unreadable(server: ArtServer) -> None:
     server.unreadable.clear()
 
 
-def _choose_shrine(server: ArtServer) -> ArtFolder | None:
+def _choose_shrine(server: ArtServer, *, can_list: bool = False) -> ArtFolder | None:
+    """Search for a shrine by name, or (can_list) pick one from a TV's list of them."""
+    if not can_list:
+        return _search_shrine(server)
+    ways = [("Search by name", "search")] + [
+        (f"List TV {n}'s shrines ({TVS[n].split(': ', 1)[1]})", n) for n in IN_ROOM] + [
+        (f"List TV {HALLWAY}'s own shrines (the hallway also shows all of TV 1-3's)", HALLWAY)]
+    while True:
+        way = ui.choose(ways, "Find the shrine:")
+        if way is None:
+            return None
+        picked = _search_shrine(server) if way == "search" else _list_shrines(server, way)
+        if picked != "again":
+            return picked
+
+
+def _list_shrines(server: ArtServer, tv: int) -> ArtFolder | str | None:
+    with on_pi_files(server):
+        found = server.shrines(tv)
+    _say_unreadable(server)
+    if not found:
+        ui.info(f"TV {tv} has no shrines of its own on pi-files.")
+        return "again"
+    return ui.choose([(art.folder, art) for art in found] + [("Search or list again", "again")],
+                     f"TV {tv}'s {len(found)} shrine{'s' if len(found) != 1 else ''}. Which one?")
+
+
+def _search_shrine(server: ArtServer) -> ArtFolder | None:
     while True:
         text = ui.ask("Type part of the student's username or the collection's name")
         if text is None:
@@ -530,10 +557,12 @@ def _convert(server: ArtServer, art: ArtFolder, path: str, video: str, work: Pat
 # --- Keeping the TVs the same as pi-files --------------------------------------------------
 
 def update_shrine(settings: TvsSettings, server: ArtServer, art: ArtFolder, *,
-                  removed: bool = False, gone: set[str] | frozenset[str] = frozenset()) -> None:
+                  removed: bool = False, gone: set[str] | frozenset[str] = frozenset(),
+                  moved_from: int | None = None) -> None:
     """After a change to one shrine: make its videos again from its art, then put them on
     its TV and the hallway, taking off the ones that are gone. (removed: the whole shrine
-    was taken off pi-files, so gone is all of its videos.)"""
+    was taken off pi-files, so gone is all of its videos. moved_from: the TV it was on
+    before, whose TV takes its gone videos off too.)"""
     gone = set(gone)
     with on_pi_files(server):
         if not removed:
@@ -542,10 +571,12 @@ def update_shrine(settings: TvsSettings, server: ArtServer, art: ArtFolder, *,
                                      for f, size in server.videos(art).items()}
         if gone:  # for TVs that are off, so the next update takes them off too
             server.note_deleted(server.deleted() | gone)
-    numbers = tvs_showing(art.tv)
+    showing = tvs_showing(art.tv)
+    numbers = sorted({*showing, *tvs_showing(moved_from or art.tv)})
     ui.info(f"\nUpdating {' and '.join(TV_NAMES[n] for n in numbers)}:")
     for number in numbers:
-        _on_tv(settings, number, lambda tv: _put_shrine(tv, server, videos, gone))
+        _on_tv(settings, number, lambda tv, shown=videos if number in showing else {}:
+               _put_shrine(tv, server, shown, gone))
 
 
 TV_NAMES = {1: "TV 1", 2: "TV 2", 3: "TV 3", 4: "TV 4 (the hallway)"}
@@ -757,10 +788,16 @@ def _ask_collection_name() -> tuple[str, str] | None:
         ui.error("Type a name, using letters and numbers.")
 
 
-def _ask_tv(name: str) -> int | None:
+def _ask_tv(name: str, now: int | None = None) -> int | None:
+    """Which TV a shrine is for. Enter picks the one its name suggests, or (for a shrine
+    that's on a TV already) the one it's on now."""
     suggested = (shrine.suggest_tv(name) if is_student(name) else 3) or 1
-    return ui.choose([(label, number) for number, label in TVS.items()],
-                     f"Which TV is it for? (TV {suggested}, going by its name.)")
+    if now is None or now == suggested:
+        question = f"Which TV is it for? (TV {suggested}, going by its name.)"
+    else:
+        question = f"Which TV is it for? (It's on TV {now} now; going by its name, TV {suggested}.)"
+    return ui.choose([(label, number) for number, label in TVS.items()], question,
+                     default=suggested if now is None else now)
 
 
 def _ask_title(name: str, text: str | None) -> tuple[shrine.Title | None] | None:
@@ -1023,7 +1060,7 @@ def view_art(settings: TvsSettings) -> None:
     with art_server(settings) as server:
         if server is None:
             return
-        art = _choose_shrine(server)
+        art = _choose_shrine(server, can_list=True)
         if art is None:
             return
         name = art.name
@@ -1066,6 +1103,59 @@ def view_art(settings: TvsSettings) -> None:
 def _describe(path: str, size: int) -> str:
     kind = "title card" if is_title_card(path) else "picture" if is_picture(path) else "video"
     return f"{posixpath.basename(path)} ({kind}, {size_text(size)})"
+
+
+def rename_shrine(settings: TvsSettings) -> None:
+    with art_server(settings) as server:
+        if server is None:
+            return
+        art = _choose_shrine(server, can_list=True)
+        if art is None:
+            return
+        student = is_student(art.name)
+        name, text = (_ask_username(), None) if student else _ask_collection_name() or (None, None)
+        if name is None:
+            return
+        with on_pi_files(server):
+            found = [f for f in server.find(name, exact=True) if f.path != art.path]
+        if found:
+            ui.error(f"pi-files already has a shrine for {name} (TV {found[0].tv}). Remove "
+                     "it, or pick another name.")
+            return
+        tv = _ask_tv(name, now=art.tv)
+        if tv is None:
+            return
+        if name == art.name and tv == art.tv:
+            ui.info("That's its name and TV already, so nothing's changed.")
+            return
+        with on_pi_files(server):
+            cards = [p for p in server.art_files(art) if is_title_card(p)]
+        new_card = None  # (the new title card, or None for none), if it's to change
+        if cards and name != art.name:
+            remake = ui.confirm(f"Its title card has {art.name}'s name on it. Make a new one?",
+                                default=True)
+            if remake is None:
+                return
+            if remake:
+                new_card = _ask_title(name, text)
+                if new_card is None:
+                    return
+        with on_pi_files(server):
+            gone = set(server.videos(art))
+            new = server.rename(art, name, tv)
+            ui.success(f"Renamed {art.path} to {new.path} on pi-files.")
+            if new_card is not None:
+                for path in server.art_files(new):
+                    if is_title_card(path):
+                        server.remove(path)
+                (title,) = new_card
+                if title is not None:
+                    with tempfile.TemporaryDirectory(prefix="shrine-") as work:
+                        card = Path(work) / f"{name}.a.title.png"
+                        shrine.title_card(title).save(card)
+                        server.upload(card, posixpath.join(new.path, card.name))
+                    ui.success("Made its new title card.")
+        update_shrine(settings, server, new, gone=gone, moved_from=art.tv)
 
 
 def remove_shrine(settings: TvsSettings) -> None:
@@ -1152,7 +1242,8 @@ def docs(settings: TvsSettings) -> None:
 ACTIONS = [
     ("Make a shrine (a student's art, or a collection)", make_shrine),
     ("Add art to a shrine", add_art),
-    ("See, open or delete a shrine's art", view_art),
+    ("List, View, and/or Delete a Shrine's Art", view_art),
+    ("Rename a shrine (e.g. to a different username)", rename_shrine),
     ("Remove a shrine", remove_shrine),
     ("Update the TVs from pi-files", update),
     ("Turn TVs on or off", power),

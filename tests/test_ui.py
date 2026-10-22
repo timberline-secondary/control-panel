@@ -91,6 +91,13 @@ def test_menus_are_numbered_with_q_to_quit(typed, capsys):
     assert prompts == ["Choose an item or (q)uit: "]
 
 
+@pytest.mark.parametrize("answers, expected", [([""], 2), (["1"], 1), (["q"], None)])
+def test_choose_with_a_default(typed, answers, expected):
+    prompts = typed(*answers)
+    assert ui.choose(MENU, default=2) == expected
+    assert prompts == ["Choose an item (Enter = 2), or (q)uit: "]
+
+
 TVS = [ui.choice("TV 1", 1), ui.choice("TV 2", 2), ui.choice("TV 3", 3), ui.choice("TV 4", 4)]
 
 
@@ -135,6 +142,18 @@ def test_every_question_has_a_blank_line_before_it(typed, capsys):
     assert capsys.readouterr().out == "  Getting a.png [####] 100%\n\n\n\nWhich one?\n  1. a\n\n"
     assert prompts == ["Type something, or (q)uit: ", "Delete it? (Y/n): ",
                        "Choose an item or (q)uit: "]
+
+
+def test_no_waiting_when_nothing_new_was_shown_after_the_last_question(typed, monkeypatch):
+    monkeypatch.setattr(ui, "clear", lambda: None)
+
+    def add_theme(action):
+        ui.success("Added!")
+        ui.confirm("Add another theme?")
+    prompts = typed("1", "n", "q")
+    ui.run_menu("Themes", [("Add a new theme", "add")], add_theme)
+    assert prompts == ["Choose an item or (q)uit: ", "Add another theme? (Y/n): ",
+                       "Choose an item or (q)uit: "]  # no "Press Enter to go back."
 
 
 def test_the_main_menu_doesnt_wait(typed, monkeypatch):

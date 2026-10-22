@@ -3,7 +3,8 @@
 - A panel clears the screen and shows its heading, then its numbered menu.
 - A menu: type a number and press Enter, or q to go back (or quit, from the main menu).
 - A question says what q does: "Grad year (Enter = 2027), or (q)uit: ".
-- When something's done, "Press Enter to go back." keeps the result on screen.
+- When something's done, "Press Enter to go back." keeps the result on screen (if there's
+  anything new to read since the last question).
 """
 
 from __future__ import annotations
@@ -36,10 +37,18 @@ def _colours_work() -> bool:
 
 
 _COLOURS = _colours_work()
+_shown = False  # whether anything's been shown since the last answer
+_asking: str | None = None  # the question waiting for an answer, if one is
 
 
 def _print(text: str, colour: str = "") -> None:
-    print(f"{colour}{text}{RESET}" if colour and _COLOURS else text, flush=True)
+    global _shown
+    _shown = True
+    text = f"{colour}{text}{RESET}" if colour and _COLOURS else text
+    if _asking is not None and _COLOURS:  # from another thread, while a question waits
+        print(f"\r\033[K{text}\n{_asking}", end="", flush=True)  # (so ask it again below)
+    else:
+        print(text, flush=True)
 
 
 def clear() -> None:
@@ -75,12 +84,16 @@ def error(text: str) -> None:
 def _input(text: str) -> str | None:
     """What they typed, once they press Enter (after a blank line, so the question stands
     out). None for Ctrl+C or Ctrl+D."""
+    global _shown, _asking
     print()
+    _asking = text
     try:
         return input(text)
     except (EOFError, KeyboardInterrupt):
         print()
         return None
+    finally:
+        _asking, _shown = None, False
 
 
 def ask(prompt: str, default: str = "") -> str | None:
@@ -94,12 +107,15 @@ def ask(prompt: str, default: str = "") -> str | None:
 
 
 def ask_password(prompt: str) -> str | None:
+    global _shown
     print()
     try:
         answer = getpass(f"{prompt}, or (q)uit: ")
     except (EOFError, KeyboardInterrupt):
         print()
         return None
+    finally:
+        _shown = False
     return None if answer.strip().lower() == "q" else answer
 
 
@@ -131,19 +147,25 @@ def _items(choices: list) -> list[tuple[str, Any]]:
     return [(title, value) for title, value in items if value is not BACK]
 
 
-def choose(choices: list, question: str = "") -> Any:
-    """A numbered menu. Returns the chosen value, or None for q."""
+def choose(choices: list, question: str = "", default: Any = None) -> Any:
+    """A numbered menu. Returns the chosen value (default's, for just Enter, if it's one of
+    them), or None for q."""
     items = _items(choices)
+    values = [value for _, value in items]
+    enter = f" (Enter = {values.index(default) + 1})" if default in values else ""
     if question:
         print()
         _print(question, BOLD)
     for number, (title, _) in enumerate(items, start=1):
         _print(f"  {number}. {title}")
     while True:
-        answer = _input("Choose an item or (q)uit: ")
+        answer = _input(f"Choose an item{enter}, or (q)uit: " if enter
+                        else "Choose an item or (q)uit: ")
         if answer is None or answer.strip().lower() == "q":
             return None
         answer = answer.strip()
+        if not answer and enter:
+            return default
         if answer.isascii() and answer.isdigit() and 1 <= int(answer) <= len(items):
             return items[int(answer) - 1][1]
         error(f"Type a number from 1 to {len(items)}." if items else "Type q to go back.")
@@ -186,7 +208,8 @@ def _numbers(text: str, count: int) -> list[int] | None:
 def run_menu(title: str, actions: list[tuple[str, Any]], do: Callable[[Any], None], *,
              pause_after: bool = True) -> None:
     """A panel: clear the screen, show its heading and menu, and do what's chosen (showing
-    its name first, so it's clear what the questions are about), until q."""
+    its name first, so it's clear what the questions are about), until q. Afterwards it
+    waits for Enter, unless nothing's been shown since the last question was answered."""
     while True:
         clear()
         heading(title)
@@ -197,13 +220,15 @@ def run_menu(title: str, actions: list[tuple[str, Any]], do: Callable[[Any], Non
         print()
         _print(name, BOLD)
         do(action)
-        if pause_after:
+        if pause_after and _shown:
             pause()
 
 
 @contextmanager
 def progress(label: str) -> Iterator[Callable[[float], None]]:
     """A progress bar on one line. Gives a function to call with the fraction done (0 to 1)."""
+    global _shown
+    _shown = True
     shown = -1
     live = sys.stdout is not None and sys.stdout.isatty()
 

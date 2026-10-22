@@ -303,6 +303,33 @@ class ArtServer:
         self._mkdir(art.path)
         return art
 
+    def rename(self, art: ArtFolder, name: str, tv: int) -> ArtFolder:
+        """Rename a shrine (into tv's folder), and its art and videos with it:
+        old.name.z.sun.png -> new.name.z.sun.png. The note of what its videos were made from
+        is renamed too, so they aren't made again."""
+        def renamed(file_name: str) -> str:
+            if file_name.lower().startswith(f"{art.name}."):
+                return name + file_name[len(art.name):]
+            return file_name
+
+        new = ArtFolder(tv, posixpath.join(self.tv_path(tv), name), name)
+        self._mkdir(self.tv_path(tv))
+        self._rename(art.path, new.path)
+        for folder in (new.path, new.videos):
+            for file_name in self._list(folder)[1]:
+                if renamed(file_name) != file_name:
+                    self._rename(posixpath.join(folder, file_name),
+                                 posixpath.join(folder, renamed(file_name)))
+        note_path = posixpath.join(new.videos, MADE_NOTE)
+        if note := self.read_json(note_path):
+            note["pictures"] = [[renamed(f), size] for f, size in note.get("pictures", [])]
+            note["animated"] = [renamed(f) for f in note.get("animated", [])]
+            note["sources"] = {renamed(video): [renamed(f), size]
+                               for video, (f, size) in note.get("sources", {}).items()}
+            note["unusable"] = {renamed(f): why for f, why in note.get("unusable", {}).items()}
+            self.write_json(note_path, note)
+        return new
+
     def read_json(self, path: str) -> dict:
         """A small JSON file's contents ({} if it isn't there or is damaged)."""
         if not self.connection.exists(path):
