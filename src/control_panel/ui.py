@@ -60,6 +60,11 @@ def clear() -> None:
         print("\033[2J\033[3J\033[H", end="", flush=True)
 
 
+def swatch(rgb: tuple[int, int, int]) -> str:
+    """A small block of a colour, where colours can be shown (otherwise nothing)."""
+    return f"\033[48;2;{rgb[0]};{rgb[1]};{rgb[2]}m   {RESET}" if _COLOURS else ""
+
+
 def heading(title: str) -> None:
     line = "#" * 60
     _print(f"{line}\n#{title.upper().center(58)}#\n{line}\n", BOLD)

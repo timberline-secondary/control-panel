@@ -46,6 +46,12 @@ class ThemesSettings(PiSettings):
 
 
 @dataclass(frozen=True)
+class ClockSettings(PiSettings):
+    host: str = "pi-projector.hackerspace.tbl"
+    clock_dir: str = "/home/pi/jsclock"  # where the clock (index.html) is
+
+
+@dataclass(frozen=True)
 class TvsSettings:
     """The TV Pis. They share a login; TV n is at host_pattern with {n} filled in."""
 
@@ -73,6 +79,7 @@ class TvsSettings:
 class Config:
     themes: ThemesSettings = field(default_factory=ThemesSettings)
     tvs: TvsSettings = field(default_factory=TvsSettings)
+    clock: ClockSettings = field(default_factory=ClockSettings)
 
 
 def default_path() -> Path:
@@ -115,6 +122,7 @@ def load(config_path: Path | None = None) -> Config:
     return Config(
         themes=_section(ThemesSettings, data.get("themes", {}), "themes", config_path),
         tvs=_section(TvsSettings, data.get("tvs", {}), "tvs", config_path),
+        clock=_section(ClockSettings, data.get("clock", {}), "clock", config_path),
     )
 
 

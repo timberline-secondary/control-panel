@@ -8,9 +8,9 @@ import traceback
 from pathlib import Path
 
 from control_panel import __version__, config, ui, updater
-from control_panel.panels import grade9, themes, tvs
+from control_panel.panels import clock, grade9, themes, tvs
 
-PANELS = [tvs, themes, grade9]
+PANELS = [tvs, themes, grade9, clock]
 
 
 def main(argv: list[str] | None = None) -> int:

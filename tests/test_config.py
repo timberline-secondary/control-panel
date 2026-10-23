@@ -14,6 +14,8 @@ def test_defaults_when_there_is_no_file(tmp_path, monkeypatch):
     assert settings.themes.host == "pi-themes.hackerspace.tbl"
     assert settings.themes.songs_dir == "/mnt/usb0"
     assert settings.themes.password is None
+    assert settings.clock.host == "pi-projector.hackerspace.tbl"
+    assert settings.clock.clock_dir == "/home/pi/jsclock"
 
 
 def test_a_chosen_file_that_is_missing_is_an_error(tmp_path, monkeypatch):

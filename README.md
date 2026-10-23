@@ -20,8 +20,8 @@ yes and it downloads the new version, swaps it in and restarts. (You can also ru
 
 ## Using it
 
-The main menu has three panels: **TV Art Shrines**, **Entrance Theme Machine** and **Grade 9
-Mode**. Each panel clears the screen and shows its heading, then a numbered menu: type a number
+The main menu has four panels: **TV Art Shrines**, **Entrance Theme Machine**, **Grade 9
+Mode** and **Projector Clock**. Each panel clears the screen and shows its heading, then a numbered menu: type a number
 and press Enter, or `q` to go back (or quit, from the main menu). Questions end with
 `, or (q)uit:`, and show what Enter does if it does something, like
 `Type their grad year (Enter = 2027), or (q)uit:`. Yes-or-no questions are `(Y/n)` or `(y/N)`,
@@ -127,6 +127,34 @@ Nothing on pi-themes needs to change to use this app.
 Turns TVs 1-3 off and mutes the entrance themes, or turns them back on and unmutes. TV 4 (the
 hallway) is left alone.
 
+### Projector Clock
+
+The clock on the projector ([jsclock](https://github.com/timberline-secondary/jsclock)) shows
+the time, the current block, and the time left until the next. It's a web page shown in
+Firefox on **pi-projector**. Each schedule is a list of periods (e.g. *A Block* from 08:50,
+*Go to B Block Class* from 10:10), each with a type (Block, Break, Lunch or Transition) and
+the colour shown behind the clock; it's used on certain days of the week, and can also be
+used on particular dates.
+
+The schedules are kept on pi-projector, in `/home/pi/jsclock/schedules.js`. Each time they're
+saved, the ones from before are kept in `backups/` next to it, and the clock is restarted so
+it shows the change (or, if you'd rather wait, it picks them up at midnight).
+
+| Menu item | What it does |
+| --- | --- |
+| See the schedules | Each schedule's days and dates, and its periods with their colours, then which one the clock shows today. |
+| Use a schedule on certain dates | E.g. the Flex schedule on a Friday, or an assembly or early dismissal schedule. On those dates the clock uses it instead of the usual one. Dates can be typed as `2026-10-30`, `10-30`, `today` or `tomorrow`. Dates that have gone by are tidied away. |
+| Make a new schedule | Starts as a copy of one you choose, then change it (as below). Give it days of the week, or none and use it on dates. |
+| Change a schedule | Change, add or remove periods (what it says, when it starts, its type and colour), and the schedule's name and days. A day of the week only has one schedule, so giving one a day takes it from any other. It's checked before saving, e.g. that the first period starts at 00:00. |
+| Remove a schedule | |
+| Go back to an earlier version of the schedules | Lists the copies kept each time they were saved, shows the one you pick, and puts it back. |
+| Restart the clock, update it, or reboot pi-projector | Restarting the clock makes it read its schedules again. Updating gets the latest clock from GitHub (`git pull`), then restarts it. |
+| Projector Clock documentation | A link to jsclock's README. |
+
+The first time schedules are saved, the clock may need updating to a version that reads
+`schedules.js`: the app says so and offers to do it. Its schedules, as they are on the Pi, are
+kept.
+
 ## Settings (optional)
 
 The defaults work in the Hackerspace. To change something, create a `config.toml` file at:
@@ -159,6 +187,13 @@ ffmpeg = ""                         # an ffmpeg.exe to use; empty means download
 art_host = "pi-files.hackerspace.tbl"  # the Pi that keeps the shrines' art (same login as the TVs)
 # (if that name isn't found, its short name, e.g. pi-files, and pi-files.local are tried)
 art_dir = "/mnt/ssd"                # its external drive, with a folder for each TV (tv1 to tv4)
+
+[clock]
+host = "pi-projector.hackerspace.tbl"
+port = 22
+username = "pi"
+# password = "..."                  # leave out to be asked (recommended)
+clock_dir = "/home/pi/jsclock"      # where the clock (index.html) is
 ```
 
 The Pis usually share a password, so once you've typed it for one Pi, the app tries it on the
@@ -184,6 +219,7 @@ uv run ruff check src tests   # lint
 | `src/control_panel/panels/tvs.py` | The TV Art Shrines panel: making each shrine's videos from its art, keeping the TVs the same as pi-files, and `TvPi` for talking to a TV Pi. |
 | `src/control_panel/art.py` | pi-files: where the shrines' art, and the videos made from it, are kept. |
 | `src/control_panel/panels/grade9.py` | Grade 9 mode. |
+| `src/control_panel/panels/clock.py` | The Projector Clock panel. |
 | `src/control_panel/shrine.py` | Making shrines: title cards (Pillow), pictures, slideshows, converting videos. |
 | `src/control_panel/ffmpeg.py` | Downloading ffmpeg (pinned, checksum checked) and running it. |
 | `src/control_panel/ssh.py` | Running commands and copying files on a Pi (paramiko). |
