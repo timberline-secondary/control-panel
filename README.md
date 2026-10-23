@@ -131,7 +131,7 @@ hallway) is left alone.
 
 The clock on the projector ([jsclock](https://github.com/timberline-secondary/jsclock)) shows
 the time, the current block, and the time left until the next. It's a web page shown in
-Firefox on **pi-projector**. Each schedule is a list of periods (e.g. *A Block* from 08:50,
+a browser (Chromium) on **pi-projector**. Each schedule is a list of periods (e.g. *A Block* from 08:50,
 *Go to B Block Class* from 10:10), each with a type (Block, Break, Lunch or Transition) and
 the colour shown behind the clock; it's used on certain days of the week, and can also be
 used on particular dates.
@@ -148,7 +148,7 @@ it shows the change (or, if you'd rather wait, it picks them up at midnight).
 | Change a schedule | Change, add or remove periods (what it says, when it starts, its type and colour), and the schedule's name and days. A day of the week only has one schedule, so giving one a day takes it from any other. It's checked before saving, e.g. that the first period starts at 00:00. |
 | Remove a schedule | |
 | Go back to an earlier version of the schedules | Lists the copies kept each time they were saved, shows the one you pick, and puts it back. |
-| Restart the clock, update it, or reboot pi-projector | Restarting the clock makes it read its schedules again. Updating gets the latest clock from GitHub (`git pull`), then restarts it. |
+| Restart the clock, update it, or reboot pi-projector | Restarting the clock makes it read its schedules again. Updating makes the clock the latest one on GitHub, then restarts it. If some of its files were changed on the Pi (and are different on GitHub), it lists them and asks first; the Pi's versions are kept in git (a `before-update-…` branch, or the stash). |
 | Projector Clock documentation | A link to jsclock's README. |
 
 The first time schedules are saved, the clock may need updating to a version that reads

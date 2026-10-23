@@ -284,14 +284,14 @@ def test_an_old_clock_is_updated_before_schedules_are_saved(pi, monkeypatch):
     monkeypatch.setattr(clock, "ClockPi", lambda connection, settings: pi)
     commands = []
     monkeypatch.setattr(pi.connection, "run", lambda command, **k: commands.append(command)
-                        or CommandResult(0, "" if "git status" in command else "Fast-forward"))
+                        or CommandResult(0, ""))
     screen = Screen(monkeypatch, confirms=[True], chooses=[None])  # then on to the dates
     clock._do(clock.set_dates, ClockSettings())
     screen.finished()
     assert "needs updating" in screen.text("warning")
     # Its schedules were kept first, as the update replaces schedule_data.js.
     assert [s["description"] for s in saved(pi)] == ["4-Block", "Flex", "Weekend"]
-    assert any("git pull --ff-only" in c for c in commands)
+    assert any("reset -q --hard" in c for c in commands)
     assert any("launcher.sh" in c for c in commands)  # then restarted
 
 
@@ -325,7 +325,7 @@ def test_an_update_takes_a_login_out_of_the_clocks_github_address(pi, monkeypatc
         commands.append(command)
         if "get-url" in command:
             return CommandResult(0, TOKEN_URL + "\n")
-        if "git pull" in command:
+        if "git fetch" in command:
             return CommandResult(1, f"fatal: unable to access '{TOKEN_URL}': nope")
         return CommandResult(0, "")
     monkeypatch.setattr(pi.connection, "run", run)
@@ -354,14 +354,56 @@ def test_an_update_switches_an_ssh_github_address_to_the_web_one(pi, monkeypatch
     set_url = [c for c in commands if "set-url" in c]
     assert set_url and set_url[0].endswith(
         "set-url origin https://github.com/timberline-secondary/jsclock.git")
-    assert commands.index(set_url[0]) < next(i for i, c in enumerate(commands) if "pull" in c)
+    assert commands.index(set_url[0]) < next(i for i, c in enumerate(commands) if "fetch" in c)
 
 
-def test_an_update_leaves_a_clock_changed_on_the_pi_alone(pi, monkeypatch):
-    monkeypatch.setattr(pi.connection, "run", lambda command, **k: CommandResult(
-        0, " M styles.css\n M schedule_data.js\n?? schedules.js\n"))
-    with pytest.raises(ClockError, match=r"changed on .* \(styles.css\)"):
-        clock._update(pi)
+def git_on_the_pi(pi, monkeypatch, *, committed="", uncommitted="", different=""):
+    """The Pi's copy of the clock, with files changed there (committed or not) and files
+    that are different from GitHub's. Returns the commands run."""
+    commands = []
+
+    def run(command, **k):
+        commands.append(command)
+        if "diff --name-only '@{u}...HEAD'" in command:
+            return CommandResult(0, committed)
+        if "diff --name-only HEAD" in command:
+            return CommandResult(0, uncommitted)
+        if "diff --name-only '@{u}'" in command:
+            return CommandResult(0, different)
+        return CommandResult(0, "")
+    monkeypatch.setattr(pi.connection, "run", run)
+    return commands
+
+
+def test_an_update_asks_before_replacing_files_changed_on_the_pi(pi, monkeypatch):
+    commands = git_on_the_pi(pi, monkeypatch, committed="launcher.sh\nschedule_data.js\n",
+                             uncommitted="styles.css\n",
+                             different="launcher.sh\nschedule_data.js\nstyles.css\n")
+    screen = Screen(monkeypatch, confirms=[False])
+    clock._update(pi)
+    screen.finished()
+    warning = screen.text("warning")
+    assert "launcher.sh, styles.css." in warning and "schedule_data" not in warning
+    assert not any("reset" in c for c in commands)  # they said no
+
+
+def test_an_update_doesnt_ask_when_github_has_the_pis_changes_too(pi, monkeypatch):
+    # e.g. the Pi's own commits were put on GitHub, so its files are the same as GitHub's
+    commands = git_on_the_pi(pi, monkeypatch, committed="launcher.sh\nclock_script.js\n",
+                             different="")
+    Screen(monkeypatch).finished()
+    clock._update(pi)
+    (update,) = [c for c in commands if "reset" in c]
+    assert "stash push" in update and "git branch before-update-" in update  # kept
+    assert update.endswith("git reset -q --hard '@{u}' 2>&1")
+    assert any("launcher.sh" in c for c in commands)  # then restarted
+
+
+def test_restarting_closes_chromium_or_firefox(pi, monkeypatch):
+    commands = git_on_the_pi(pi, monkeypatch)
+    pi.restart()
+    (restart,) = commands
+    assert "pkill -f '[c]hromium|[f]irefox'" in restart
 
 
 def test_the_menu():
