@@ -1,6 +1,6 @@
 """Projector Clock: the clock on the projector, showing the time, the current block and the
 time left in it. It's jsclock (https://github.com/timberline-secondary/jsclock), a web page
-shown in Firefox on pi-projector.
+shown full-screen in a web browser (Chromium) on pi-projector.
 
 Its schedules are kept on the Pi, in schedules.js next to the clock. This panel reads them,
 changes them, and saves them there (keeping a copy of the old ones in backups/ each time),
@@ -30,7 +30,7 @@ DOCS = "https://github.com/timberline-secondary/jsclock#schedules"
 SAVED = "schedules.js"  # the schedules saved on the Pi (what the clock uses, if it's there)
 DEFAULTS = "schedule_data.js"  # the clock's own schedules, used until some are saved
 BACKUPS = "backups"
-LAUNCHER = "launcher.sh"  # starts Firefox showing the clock
+LAUNCHER = "launcher.sh"  # starts the browser showing the clock
 
 DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 WEEKDAYS = [1, 2, 3, 4, 5]
@@ -333,41 +333,52 @@ class ClockPi:
             raise ClockError(f"Couldn't read the schedules in {name} ({e}).") from e
 
     def restart(self) -> CommandResult:
-        """Close Firefox and start the clock again, as at startup."""
+        """Close the browser and start the clock again, as at startup."""
         launcher = shlex.quote(self._path(LAUNCHER))
-        # ([f]irefox matches Firefox however it's named, but not this command itself.)
+        # Chromium or Firefox, however they're named. ([c]hromium matches "chromium", but
+        # not this command itself.)
+        browser = "'[c]hromium|[f]irefox'"
         return self.connection.run(
-            "pkill -f '[f]irefox'; "
-            "for i in $(seq 20); do pgrep -f '[f]irefox' >/dev/null || break; sleep 0.5; done; "
+            f"pkill -f {browser}; "
+            f"for i in $(seq 20); do pgrep -f {browser} >/dev/null || break; sleep 0.5; done; "
             f"DISPLAY=:0 setsid nohup bash {launcher} >/dev/null 2>&1 </dev/null & "
-            "sleep 5; pgrep -f '[f]irefox' >/dev/null", timeout=60)
+            f"sleep 5; pgrep -f {browser} >/dev/null", timeout=60)
 
-    def update_code(self) -> CommandResult:
-        """Get the latest clock from GitHub. Local changes to schedule_data.js are dropped:
-        the schedules are kept in schedules.js."""
-        folder = shlex.quote(self.settings.clock_dir)
-        return self.connection.run(
-            f"cd {folder} && git checkout -- {DEFAULTS} && git pull --ff-only 2>&1",
-            timeout=120)
+    def _git(self, args: str, timeout: float = 60) -> CommandResult:
+        return self.connection.run(f"cd {shlex.quote(self.settings.clock_dir)} && git {args}",
+                                   timeout=timeout)
 
     def github_address(self) -> str:
-        result = self.connection.run(
-            f"cd {shlex.quote(self.settings.clock_dir)} && git remote get-url origin")
+        result = self._git("remote get-url origin")
         return result.output.strip() if result.ok else ""
 
     def set_github_address(self, url: str) -> CommandResult:
-        return self.connection.run(f"cd {shlex.quote(self.settings.clock_dir)} && "
-                                   f"git remote set-url origin {shlex.quote(url)}")
+        return self._git(f"remote set-url origin {shlex.quote(url)}")
 
-    def changed_code(self) -> list[str] | None:
-        """The clock's files that were changed on the Pi (besides its schedules), or None if
-        it isn't a copy from GitHub."""
-        result = self.connection.run(
-            f"cd {shlex.quote(self.settings.clock_dir)} && git status --porcelain")
-        if not result.ok:
+    def fetch(self) -> CommandResult:
+        """Get the latest clock from GitHub (without changing the one the Pi runs yet)."""
+        return self._git("fetch -q 2>&1", timeout=120)
+
+    def changed_here(self) -> list[str] | None:
+        """The clock's files that were changed on the Pi (committed there or not) and are
+        different on GitHub, besides schedule_data.js (its schedules are kept in
+        schedules.js). None if it isn't a copy from GitHub. Call fetch() first."""
+        if not self._git("rev-parse -q --verify '@{u}'").ok:
             return None
-        return [line[3:] for line in result.output.splitlines()
-                if not line.startswith("??") and line[3:] != DEFAULTS]
+        here = (self._git("diff --name-only '@{u}...HEAD'").output.splitlines()
+                + self._git("diff --name-only HEAD").output.splitlines())
+        different = set(self._git("diff --name-only '@{u}'").output.splitlines())
+        return sorted(set(here) & different - {DEFAULTS})
+
+    def match_github(self) -> CommandResult:
+        """Make the clock exactly the one on GitHub. What was changed on the Pi is kept in
+        git: commits in a branch (before-update-<when>), other changes in the stash."""
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        return self._git(
+            f"stash push -q -m 'before update {stamp}'; "
+            "if [ -n \"$(git rev-list '@{u}..HEAD')\" ]; then "
+            f"git branch before-update-{stamp}; fi; "
+            "git reset -q --hard '@{u}' 2>&1")
 
     def keep_schedules(self) -> bool:
         """Before an update replaces schedule_data.js: save the schedules in it (as they are
@@ -658,14 +669,6 @@ def _restart(pi: ClockPi) -> None:
 
 def _update(pi: ClockPi) -> None:
     pi.check()
-    changed = pi.changed_code()
-    if changed is None:
-        raise ClockError(f"{pi.settings.clock_dir} on {pi.settings.host} isn't a copy of the "
-                         "clock from GitHub, so it can't be updated from there.")
-    if changed:
-        raise ClockError(f"Some of the clock's files were changed on {pi.settings.host} "
-                         f"({', '.join(changed)}), so it isn't updated in case they'd be "
-                         "lost. Put them on GitHub first.")
     if found := plain_address(pi.github_address()):
         plain, problem = found
         ui.warning(f"The clock's GitHub address on {pi.settings.host} {problem}. The clock is "
@@ -675,11 +678,22 @@ def _update(pi: ClockPi) -> None:
         if not pi.set_github_address(plain).ok:
             raise ClockError("Couldn't change its GitHub address.")
         ui.success("Changed it.")
+    ui.info("Getting the latest clock from GitHub...")
+    if not (result := pi.fetch()).ok:
+        raise ClockError(f"Couldn't get it: {hide_secrets(result.output.strip())}")
+    changed = pi.changed_here()
+    if changed is None:
+        raise ClockError(f"{pi.settings.clock_dir} on {pi.settings.host} isn't a copy of the "
+                         "clock from GitHub, so it can't be updated from there.")
+    if changed:
+        ui.warning(f"These were changed on {pi.settings.host}, and are different on GitHub: "
+                   f"{', '.join(changed)}. Updating replaces them with GitHub's. (The Pi's "
+                   "are kept in git, so they can be got back.)")
+        if not ui.confirm("Update anyway?", default=False):
+            return
     if pi.keep_schedules():
         ui.info(f"Saved its schedules, as they are on {pi.settings.host}, in {SAVED}.")
-    ui.info("Updating the clock from GitHub...")
-    result = pi.update_code()
-    if not result.ok:
+    if not (result := pi.match_github()).ok:
         raise ClockError(f"Couldn't update it: {hide_secrets(result.output.strip())}")
     ui.success("Updated the clock to its latest version.")
     _restart(pi)
