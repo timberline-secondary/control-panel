@@ -134,14 +134,22 @@ def hide_secrets(text: str) -> str:
     return re.sub(r"(?<=://)[^\s/@]+@", "***@", text)
 
 
-def without_login(url: str) -> str | None:
-    """A web address without the login (name, password or token) saved in it, or None if
-    there isn't one. 'https://name:token@github.com/x.git' -> 'https://github.com/x.git'.
-    (It copes with one saved the wrong way, as 'https://name:token@https://github.com/...'.)"""
-    if "@" not in url or "://" not in url:
-        return None
-    rest = url.rsplit("@", 1)[1]
-    return (rest if "://" in rest else f"https://{rest}").rstrip("/")
+def plain_address(url: str) -> tuple[str, str] | None:
+    """For a GitHub address that needs a login to work: (the plain web address, which needs
+    none for a public repo, why the old one is a problem). None if it's plain already.
+    - 'https://name:token@github.com/x.git' (it copes with one saved the wrong way, as
+      'https://name:token@https://github.com/...');
+    - 'git@github.com:x.git', which needs a key on the Pi that GitHub knows."""
+    url = url.strip()
+    if found := re.fullmatch(r"(?:ssh://)?git@github\.com[:/](.+?)/?", url):
+        return (f"https://github.com/{found[1]}",
+                "uses SSH, which only works if the Pi has a key GitHub knows")
+    if "@" in url and "://" in url:
+        rest = url.rsplit("@", 1)[1]
+        return ((rest if "://" in rest else f"https://{rest}").rstrip("/"),
+                "has a login (a password or token) saved in it, which anyone who can log in "
+                "to the Pi can read")
+    return None
 
 
 def rgb(colour: str) -> tuple[int, int, int] | None:
@@ -658,15 +666,15 @@ def _update(pi: ClockPi) -> None:
         raise ClockError(f"Some of the clock's files were changed on {pi.settings.host} "
                          f"({', '.join(changed)}), so it isn't updated in case they'd be "
                          "lost. Put them on GitHub first.")
-    if (plain := without_login(pi.github_address())) is not None:
-        ui.warning(f"The clock's GitHub address on {pi.settings.host} has a login (a password "
-                   "or token) saved in it. The clock is public, so it doesn't need one, and "
-                   "anyone who can log in to the Pi can read it there.")
+    if found := plain_address(pi.github_address()):
+        plain, problem = found
+        ui.warning(f"The clock's GitHub address on {pi.settings.host} {problem}. The clock is "
+                   "public, so its plain web address works without a login.")
         if not ui.confirm(f"Change the address to {plain}?", default=True):
             return
         if not pi.set_github_address(plain).ok:
             raise ClockError("Couldn't change its GitHub address.")
-        ui.success("Changed it. (If that login was a GitHub token, delete it on GitHub too.)")
+        ui.success("Changed it.")
     if pi.keep_schedules():
         ui.info(f"Saved its schedules, as they are on {pi.settings.host}, in {SAVED}.")
     ui.info("Updating the clock from GitHub...")

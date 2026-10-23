@@ -302,12 +302,20 @@ def test_secrets_in_web_addresses_are_hidden():
     message = f"fatal: unable to access '{TOKEN_URL}': Could not resolve host: https"
     assert "SECRET" not in clock.hide_secrets(message)
     assert clock.hide_secrets("https://github.com/x.git") == "https://github.com/x.git"
-    assert clock.without_login(TOKEN_URL) == \
-        "https://github.com/timberline-secondary/jsclock.git"
-    assert clock.without_login("https://name:pw@github.com/x/y.git") == \
-        "https://github.com/x/y.git"
-    assert clock.without_login("https://github.com/x/y.git") is None
-    assert clock.without_login("git@github.com:x/y.git") is None  # an SSH address
+
+
+@pytest.mark.parametrize("url, plain", [
+    (TOKEN_URL, "https://github.com/timberline-secondary/jsclock.git"),
+    ("https://name:pw@github.com/x/y.git", "https://github.com/x/y.git"),
+    ("git@github.com:timberline-secondary/jsclock.git",
+     "https://github.com/timberline-secondary/jsclock.git"),
+    ("ssh://git@github.com/x/y.git", "https://github.com/x/y.git"),
+    ("https://github.com/x/y.git", None),
+    ("", None),
+])
+def test_the_plain_github_address(url, plain):
+    found = clock.plain_address(url)
+    assert (found[0] if found else None) == plain
 
 
 def test_an_update_takes_a_login_out_of_the_clocks_github_address(pi, monkeypatch):
@@ -328,6 +336,25 @@ def test_an_update_takes_a_login_out_of_the_clocks_github_address(pi, monkeypatc
     assert any("set-url origin https://github.com/timberline-secondary/jsclock.git" in c
                for c in commands)
     assert "SECRET" not in str(failed.value) + screen.text()  # never shown
+
+
+def test_an_update_switches_an_ssh_github_address_to_the_web_one(pi, monkeypatch):
+    commands = []
+
+    def run(command, **k):
+        commands.append(command)
+        if "get-url" in command:
+            return CommandResult(0, "git@github.com:timberline-secondary/jsclock.git\n")
+        return CommandResult(0, "")
+    monkeypatch.setattr(pi.connection, "run", run)
+    screen = Screen(monkeypatch, confirms=[True])
+    clock._update(pi)
+    screen.finished()
+    assert "uses SSH" in screen.text("warning")
+    set_url = [c for c in commands if "set-url" in c]
+    assert set_url and set_url[0].endswith(
+        "set-url origin https://github.com/timberline-secondary/jsclock.git")
+    assert commands.index(set_url[0]) < next(i for i, c in enumerate(commands) if "pull" in c)
 
 
 def test_an_update_leaves_a_clock_changed_on_the_pi_alone(pi, monkeypatch):
