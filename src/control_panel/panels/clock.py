@@ -128,6 +128,22 @@ def parse_dates(text: str, today: datetime.date) -> list[str] | None:
     return dates or None
 
 
+def hide_secrets(text: str) -> str:
+    """Text (e.g. from git) with any password or token in a web address taken out:
+    https://name:token@github.com/... -> https://***@github.com/..."""
+    return re.sub(r"(?<=://)[^\s/@]+@", "***@", text)
+
+
+def without_login(url: str) -> str | None:
+    """A web address without the login (name, password or token) saved in it, or None if
+    there isn't one. 'https://name:token@github.com/x.git' -> 'https://github.com/x.git'.
+    (It copes with one saved the wrong way, as 'https://name:token@https://github.com/...'.)"""
+    if "@" not in url or "://" not in url:
+        return None
+    rest = url.rsplit("@", 1)[1]
+    return (rest if "://" in rest else f"https://{rest}").rstrip("/")
+
+
 def rgb(colour: str) -> tuple[int, int, int] | None:
     """'239, 52, 24' -> (239, 52, 24); 'default' -> the clock's dark colour. None if it
     isn't a colour."""
@@ -325,6 +341,15 @@ class ClockPi:
         return self.connection.run(
             f"cd {folder} && git checkout -- {DEFAULTS} && git pull --ff-only 2>&1",
             timeout=120)
+
+    def github_address(self) -> str:
+        result = self.connection.run(
+            f"cd {shlex.quote(self.settings.clock_dir)} && git remote get-url origin")
+        return result.output.strip() if result.ok else ""
+
+    def set_github_address(self, url: str) -> CommandResult:
+        return self.connection.run(f"cd {shlex.quote(self.settings.clock_dir)} && "
+                                   f"git remote set-url origin {shlex.quote(url)}")
 
     def changed_code(self) -> list[str] | None:
         """The clock's files that were changed on the Pi (besides its schedules), or None if
@@ -633,12 +658,21 @@ def _update(pi: ClockPi) -> None:
         raise ClockError(f"Some of the clock's files were changed on {pi.settings.host} "
                          f"({', '.join(changed)}), so it isn't updated in case they'd be "
                          "lost. Put them on GitHub first.")
+    if (plain := without_login(pi.github_address())) is not None:
+        ui.warning(f"The clock's GitHub address on {pi.settings.host} has a login (a password "
+                   "or token) saved in it. The clock is public, so it doesn't need one, and "
+                   "anyone who can log in to the Pi can read it there.")
+        if not ui.confirm(f"Change the address to {plain}?", default=True):
+            return
+        if not pi.set_github_address(plain).ok:
+            raise ClockError("Couldn't change its GitHub address.")
+        ui.success("Changed it. (If that login was a GitHub token, delete it on GitHub too.)")
     if pi.keep_schedules():
         ui.info(f"Saved its schedules, as they are on {pi.settings.host}, in {SAVED}.")
     ui.info("Updating the clock from GitHub...")
     result = pi.update_code()
     if not result.ok:
-        raise ClockError(f"Couldn't update it: {result.output.strip()}")
+        raise ClockError(f"Couldn't update it: {hide_secrets(result.output.strip())}")
     ui.success("Updated the clock to its latest version.")
     _restart(pi)
 

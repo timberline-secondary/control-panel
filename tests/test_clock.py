@@ -295,6 +295,41 @@ def test_an_old_clock_is_updated_before_schedules_are_saved(pi, monkeypatch):
     assert any("launcher.sh" in c for c in commands)  # then restarted
 
 
+TOKEN_URL = "https://someone:github_pat_SECRET123@https://github.com/timberline-secondary/jsclock.git/"
+
+
+def test_secrets_in_web_addresses_are_hidden():
+    message = f"fatal: unable to access '{TOKEN_URL}': Could not resolve host: https"
+    assert "SECRET" not in clock.hide_secrets(message)
+    assert clock.hide_secrets("https://github.com/x.git") == "https://github.com/x.git"
+    assert clock.without_login(TOKEN_URL) == \
+        "https://github.com/timberline-secondary/jsclock.git"
+    assert clock.without_login("https://name:pw@github.com/x/y.git") == \
+        "https://github.com/x/y.git"
+    assert clock.without_login("https://github.com/x/y.git") is None
+    assert clock.without_login("git@github.com:x/y.git") is None  # an SSH address
+
+
+def test_an_update_takes_a_login_out_of_the_clocks_github_address(pi, monkeypatch):
+    commands = []
+
+    def run(command, **k):
+        commands.append(command)
+        if "get-url" in command:
+            return CommandResult(0, TOKEN_URL + "\n")
+        if "git pull" in command:
+            return CommandResult(1, f"fatal: unable to access '{TOKEN_URL}': nope")
+        return CommandResult(0, "")
+    monkeypatch.setattr(pi.connection, "run", run)
+    screen = Screen(monkeypatch, confirms=[True])
+    with pytest.raises(ClockError) as failed:
+        clock._update(pi)
+    screen.finished()
+    assert any("set-url origin https://github.com/timberline-secondary/jsclock.git" in c
+               for c in commands)
+    assert "SECRET" not in str(failed.value) + screen.text()  # never shown
+
+
 def test_an_update_leaves_a_clock_changed_on_the_pi_alone(pi, monkeypatch):
     monkeypatch.setattr(pi.connection, "run", lambda command, **k: CommandResult(
         0, " M styles.css\n M schedule_data.js\n?? schedules.js\n"))
