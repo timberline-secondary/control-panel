@@ -35,7 +35,7 @@ FRAME = b"\xff\xfb\x90\x00" + b"\x55" * 413
     (b"junk from an editor" + FRAME * 3, True),
     (b"\x00" * 100 + FRAME[:4] + b"\x00" * 500, False),  # looks like one frame, by chance
     (b"\x00" * themes.MP3_SEARCH + FRAME * 2, False),  # too far in to be its audio
-])
+], ids=["padding first", "junk first", "one frame by chance", "too far in"])
 def test_mp3_audio_after_something_else(data, expected):
     assert themes.looks_like_mp3(data) is expected
 
