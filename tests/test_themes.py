@@ -26,6 +26,32 @@ def test_looks_like_mp3(data, expected):
     assert themes.looks_like_mp3(data) is expected
 
 
+# An MP3 frame: MPEG 1 layer III, 128 kbps, 44.1 kHz, so 417 bytes long.
+FRAME = b"\xff\xfb\x90\x00" + b"\x55" * 413
+
+
+@pytest.mark.parametrize("data, expected", [
+    (b"\x00" * 1000 + FRAME * 2, True),  # padding before the audio
+    (b"junk from an editor" + FRAME * 3, True),
+    (b"\x00" * 100 + FRAME[:4] + b"\x00" * 500, False),  # looks like one frame, by chance
+    (b"\x00" * themes.MP3_SEARCH + FRAME * 2, False),  # too far in to be its audio
+], ids=["padding first", "junk first", "one frame by chance", "too far in"])
+def test_mp3_audio_after_something_else(data, expected):
+    assert themes.looks_like_mp3(data) is expected
+
+
+@pytest.mark.parametrize("data, kind", [
+    (b"\n  <!DOCTYPE html><html>", "a web page"),
+    (b"\x00\x00\x00\x20ftypM4A ", "an M4A (or MP4) file"),
+    (b"RIFF\x00\x00\x00\x00WAVEfmt ", "a WAV file"),
+    (b"OggS\x00", "an OGG file"),
+    (b"", "an empty file"),
+    (b"\x00\x01\x02", None),
+])
+def test_what_it_is(data, kind):
+    assert themes.what_it_is(data) == kind
+
+
 @pytest.mark.parametrize("name, expected", [
     ("0027.mp3", "0027"),  # keeps leading zeros
     ("1234", "1234"),
@@ -67,7 +93,7 @@ def test_read_mp3_from_file(tmp_path):
 def test_read_mp3_rejects_other_files(tmp_path):
     page = tmp_path / "theme.mp3"
     page.write_bytes(b"<html></html>")
-    with pytest.raises(ThemeError, match="isn't an mp3"):
+    with pytest.raises(ThemeError, match="theme.mp3 is a web page, not an mp3"):
         themes.read_mp3(str(page))
     with pytest.raises(ThemeError, match="Couldn't find"):
         themes.read_mp3(str(tmp_path / "missing.mp3"))
@@ -140,8 +166,22 @@ def test_read_mp3_from_link(monkeypatch):
 
 def test_read_mp3_link_to_web_page(monkeypatch):
     monkeypatch.setattr(themes, "_download", lambda url: (b"<html>", "text/html"))
-    with pytest.raises(ThemeError, match="text/html"):
+    with pytest.raises(ThemeError, match="goes to a web page"):
         themes.read_mp3("https://example.com/watch?v=123")
+
+
+def test_read_mp3_link_with_something_before_the_audio(monkeypatch):
+    # e.g. a site's mp3 with padding first, given as audio/mpeg
+    song = b"\x00" * 2000 + FRAME * 4
+    monkeypatch.setattr(themes, "_download", lambda url: (song, "audio/mpeg"))
+    assert themes.read_mp3("https://example.com/2502013600.mp3") == ("2502013600.mp3", song)
+
+
+def test_read_mp3_link_to_another_kind_of_audio(monkeypatch):
+    monkeypatch.setattr(themes, "_download", lambda url: (b"\x00\x00\x00\x20ftypM4A ",
+                                                         "audio/mpeg"))
+    with pytest.raises(ThemeError, match="is an M4A \\(or MP4\\) file, not an mp3"):
+        themes.read_mp3("https://example.com/song.mp3")
 
 
 @pytest.mark.parametrize("line, expected", [

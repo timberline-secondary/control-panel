@@ -44,15 +44,64 @@ class ThemeError(Exception):
 
 # --- Helpers (no prompts, easy to test) -------------------------------------------------
 
+MP3_SEARCH = 256_000  # how far into a file to look for its audio, past anything before it
+
+
 def looks_like_mp3(data: bytes) -> bool:
-    """True if data starts the way an MP3 does: an ID3 tag or an MPEG audio frame header."""
+    """True if data is an MP3: it starts with an ID3 tag or an MPEG audio frame header, or
+    (after something else, as some sites and editors put first) has two MP3 frames in a row."""
     if data[:3] == b"ID3":
         return True
-    if len(data) < 2 or data[0] != 0xFF or data[1] & 0xE0 != 0xE0:
-        return False
-    version = (data[1] >> 3) & 0b11
-    layer = (data[1] >> 1) & 0b11
-    return version != 0b01 and layer != 0b00  # reserved version; layer 0 is AAC, not MP3
+    if len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0:
+        version = (data[1] >> 3) & 0b11
+        layer = (data[1] >> 1) & 0b11
+        if version != 0b01 and layer != 0b00:  # reserved version; layer 0 is AAC, not MP3
+            return True
+    at = data.find(b"\xff", 0, MP3_SEARCH)
+    while at >= 0:
+        length = _frame_length(data[at:at + 4])
+        if length and _frame_length(data[at + length:at + length + 4]):
+            return True
+        at = data.find(b"\xff", at + 1, MP3_SEARCH)
+    return False
+
+
+def _frame_length(header: bytes) -> int | None:
+    """The length in bytes of an MP3 (MPEG layer III) frame, from its 4-byte header. None if
+    it isn't one."""
+    if len(header) < 4 or header[0] != 0xFF or header[1] & 0xE0 != 0xE0:
+        return None
+    version = (header[1] >> 3) & 0b11  # 3: MPEG 1, 2: MPEG 2, 0: MPEG 2.5, 1: reserved
+    layer = (header[1] >> 1) & 0b11  # 1: layer III
+    bitrate, rate, padding = header[2] >> 4, (header[2] >> 2) & 0b11, (header[2] >> 1) & 1
+    if version == 0b01 or layer != 0b01 or bitrate in (0, 15) or rate == 3:
+        return None
+    if version == 0b11:
+        kbps = (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)[bitrate - 1]
+        return 144 * kbps * 1000 // (44100, 48000, 32000)[rate] + padding
+    kbps = (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)[bitrate - 1]
+    hz = (22050, 24000, 16000)[rate] // (1 if version == 0b10 else 2)
+    return 72 * kbps * 1000 // hz + padding
+
+
+def what_it_is(data: bytes) -> str | None:
+    """What a file that isn't an MP3 is, going by how it starts, if it's a common kind."""
+    if not data.strip():
+        return "an empty file"
+    start = data[:1024].lstrip().lower()
+    if start.startswith((b"<!doctype html", b"<html")) or b"<html" in start:
+        return "a web page"
+    if data[4:8] == b"ftyp":
+        return "an M4A (or MP4) file"
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "a WAV file"
+    if data[:4] == b"OggS":
+        return "an OGG file"
+    if data[:4] == b"fLaC":
+        return "a FLAC file"
+    if data[:2] in (b"\xff\xf1", b"\xff\xf9"):
+        return "an AAC file"
+    return None
 
 
 def suggest_code(filename: str) -> str | None:
@@ -97,10 +146,14 @@ def read_mp3(source: str) -> tuple[str, bytes]:
         url_path = urllib.parse.unquote(urllib.parse.urlparse(source).path)
         name = posixpath.basename(url_path) or "the download"
         data, content_type = _download(source)
-        not_mp3 = (
-            f"That link doesn't go straight to an mp3 file (it gave us '{content_type}'). "
-            "Make sure the link is to the .mp3 file itself, not a web page about it."
-        )
+        kind = what_it_is(data)
+        if kind == "a web page" or (kind is None and content_type.startswith("text/")):
+            not_mp3 = ("That link goes to a web page, not an mp3 file. Make sure the link is "
+                       "to the .mp3 file itself, not a page about it.")
+        else:
+            not_mp3 = (f"That link's file is {kind}, not an mp3." if kind else
+                       "That link's file doesn't have any mp3 audio in it.")
+            not_mp3 += " Only mp3s can be themes."
     else:
         path = Path(source).expanduser()
         if not path.is_file():
@@ -111,7 +164,9 @@ def read_mp3(source: str) -> tuple[str, bytes]:
             name, data = path.name, path.read_bytes()
         except OSError as e:
             raise ThemeError(f"Couldn't read {source}: {e.strerror or e}") from e
-        not_mp3 = f"{name} isn't an mp3 file. Only mp3s can be themes."
+        kind = what_it_is(data)
+        not_mp3 = (f"{name} is {kind}, not an mp3." if kind else
+                   f"{name} isn't an mp3 file.") + " Only mp3s can be themes."
     if not looks_like_mp3(data):
         raise ThemeError(not_mp3)
     return name, data
