@@ -332,9 +332,9 @@ def _choose_shrine(server: ArtServer, *, can_list: bool = False) -> ArtFolder | 
     """Search for a shrine by name, or (can_list) pick one from a TV's list of them."""
     if not can_list:
         return _search_shrine(server)
-    ways = [("Search by name", "search")] + [
-        (f"List TV {n}'s shrines ({TVS[n].split(': ', 1)[1]})", n) for n in IN_ROOM] + [
-        (f"List TV {HALLWAY}'s own shrines (the hallway also shows all of TV 1-3's)", HALLWAY)]
+    ways = [(f"List TV {n}'s shrines ({TVS[n].split(': ', 1)[1]})", n) for n in IN_ROOM] + [
+        (f"List TV {HALLWAY}'s own shrines (the hallway also shows all of TV 1-3's)", HALLWAY),
+        ("Search by name", "search")]  # TV n is item n
     while True:
         way = ui.choose(ways, "Find the shrine:")
         if way is None:
@@ -569,7 +569,8 @@ def update_shrine(settings: TvsSettings, server: ArtServer, art: ArtFolder, *,
             gone |= make_videos(server, art, Ffmpeg(settings))
         videos = {} if removed else {f: (posixpath.join(art.videos, f), size)
                                      for f, size in server.videos(art).items()}
-        if gone:  # for TVs that are off, so the next update takes them off too
+        if gone:  # for TVs that are off, so the next update takes them off too (a TV
+            # that still shows one never takes it off)
             server.note_deleted(server.deleted() | gone)
     showing = tvs_showing(art.tv)
     numbers = sorted({*showing, *tvs_showing(moved_from or art.tv)})
@@ -766,9 +767,9 @@ def _add_to_pi_files(tv: TvPi, server: ArtServer, file_name: str,
 
 # --- Questions -----------------------------------------------------------------------------
 
-def _ask_username() -> str | None:
+def _ask_username(prompt: str = "Type the student's username") -> str | None:
     while True:
-        username = ui.ask("Type the student's username, e.g. firstname.lastname")
+        username = ui.ask(f"{prompt}, e.g. firstname.lastname")
         if username is None:
             return None
         name = shrine.clean_name(username, space=".")
@@ -777,9 +778,9 @@ def _ask_username() -> str | None:
         ui.error("Type their username, using letters and numbers.")
 
 
-def _ask_collection_name() -> tuple[str, str] | None:
+def _ask_collection_name(prompt: str = "Type the collection's name") -> tuple[str, str] | None:
     while True:
-        text = ui.ask("Type the collection's name, e.g. Skills Canada 2026")
+        text = ui.ask(f"{prompt}, e.g. Skills Canada 2026")
         if text is None:
             return None
         name = shrine.clean_name(text, space="-").replace(".", "-")
@@ -788,16 +789,27 @@ def _ask_collection_name() -> tuple[str, str] | None:
         ui.error("Type a name, using letters and numbers.")
 
 
-def _ask_tv(name: str, now: int | None = None) -> int | None:
-    """Which TV a shrine is for. Enter picks the one its name suggests, or (for a shrine
-    that's on a TV already) the one it's on now."""
-    suggested = (shrine.suggest_tv(name) if is_student(name) else 3) or 1
-    if now is None or now == suggested:
-        question = f"Which TV is it for? (TV {suggested}, going by its name.)"
-    else:
-        question = f"Which TV is it for? (It's on TV {now} now; going by its name, TV {suggested}.)"
-    return ui.choose([(label, number) for number, label in TVS.items()], question,
-                     default=suggested if now is None else now)
+def _suggested_tv(name: str) -> int:
+    return (shrine.suggest_tv(name) if is_student(name) else 3) or 1
+
+
+def _ask_tv(name: str) -> int | None:
+    """Which TV a new shrine is for. Enter picks the one its name suggests."""
+    suggested = _suggested_tv(name)
+    return ui.choose([(label, number) for number, label in TVS.items()],
+                     f"Which TV is it for? (TV {suggested}, going by its name.)",
+                     default=suggested)
+
+
+def _ask_new_tv(art: ArtFolder) -> int | None:
+    """Which TV to move a shrine to. Enter picks the one its name suggests, if that isn't
+    the one it's on."""
+    suggested = _suggested_tv(art.name)
+    going_by = f"; going by its name, TV {suggested}" if suggested != art.tv else ""
+    return ui.choose([(f"{label}{' (it is here now)' if number == art.tv else ''}", number)
+                      for number, label in TVS.items()],
+                     f"Move it to which TV? (It's on TV {art.tv} now{going_by}.)",
+                     default=suggested if suggested != art.tv else None)
 
 
 def _ask_title(name: str, text: str | None) -> tuple[shrine.Title | None] | None:
@@ -1112,8 +1124,11 @@ def rename_shrine(settings: TvsSettings) -> None:
         art = _choose_shrine(server, can_list=True)
         if art is None:
             return
-        student = is_student(art.name)
-        name, text = (_ask_username(), None) if student else _ask_collection_name() or (None, None)
+        ui.info(f"Renaming {art.folder} (on TV {art.tv}).")
+        if is_student(art.name):
+            name, text = _ask_username("Type its new username"), None
+        else:
+            name, text = _ask_collection_name("Type its new name") or (None, None)
         if name is None:
             return
         with on_pi_files(server):
@@ -1122,11 +1137,8 @@ def rename_shrine(settings: TvsSettings) -> None:
             ui.error(f"pi-files already has a shrine for {name} (TV {found[0].tv}). Remove "
                      "it, or pick another name.")
             return
-        tv = _ask_tv(name, now=art.tv)
-        if tv is None:
-            return
-        if name == art.name and tv == art.tv:
-            ui.info("That's its name and TV already, so nothing's changed.")
+        if name == art.name:
+            ui.info("That's its name already, so nothing's changed.")
             return
         with on_pi_files(server):
             cards = [p for p in server.art_files(art) if is_title_card(p)]
@@ -1142,8 +1154,9 @@ def rename_shrine(settings: TvsSettings) -> None:
                     return
         with on_pi_files(server):
             gone = set(server.videos(art))
-            new = server.rename(art, name, tv)
-            ui.success(f"Renamed {art.path} to {new.path} on pi-files.")
+            new = server.rename(art, name, art.tv)
+            ui.success(f"Renamed {art.path} to {new.path} on pi-files, and its art and "
+                       "videos with it.")
             if new_card is not None:
                 for path in server.art_files(new):
                     if is_title_card(path):
@@ -1155,7 +1168,28 @@ def rename_shrine(settings: TvsSettings) -> None:
                         shrine.title_card(title).save(card)
                         server.upload(card, posixpath.join(new.path, card.name))
                     ui.success("Made its new title card.")
-        update_shrine(settings, server, new, gone=gone, moved_from=art.tv)
+        update_shrine(settings, server, new, gone=gone)
+
+
+def move_shrine(settings: TvsSettings) -> None:
+    with art_server(settings) as server:
+        if server is None:
+            return
+        art = _choose_shrine(server, can_list=True)
+        if art is None:
+            return
+        tv = _ask_new_tv(art)
+        if tv is None:
+            return
+        if tv == art.tv:
+            ui.info(f"It's on TV {tv} already, so nothing's changed.")
+            return
+        with on_pi_files(server):
+            videos = set(server.videos(art))
+            new = server.rename(art, art.name, tv)
+            ui.success(f"Moved {art.path} to {new.path} on pi-files.")
+        # Its videos come off its old TV, and go on its new one (the hallway keeps them).
+        update_shrine(settings, server, new, gone=videos, moved_from=art.tv)
 
 
 def remove_shrine(settings: TvsSettings) -> None:
@@ -1244,6 +1278,7 @@ ACTIONS = [
     ("Add art to a shrine", add_art),
     ("List, View, and/or Delete a Shrine's Art", view_art),
     ("Rename a shrine (e.g. to a different username)", rename_shrine),
+    ("Move a shrine to another TV", move_shrine),
     ("Remove a shrine", remove_shrine),
     ("Update the TVs from pi-files", update),
     ("Turn TVs on or off", power),
