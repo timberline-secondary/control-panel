@@ -574,11 +574,11 @@ def test_list_a_tvs_shrines_then_see_one(tmp_path, monkeypatch, pi_files):
                                           None], confirms=[False])
     tvs.view_art(TvsSettings())
     screen.finished()
-    assert seen["Find the shrine:"] == [
-        "Search by name", "List TV 1's shrines (original art, last names A-L)",
+    assert seen["Find the shrine:"] == [  # TV n is item n
+        "List TV 1's shrines (original art, last names A-L)",
         "List TV 2's shrines (original art, last names M-Z)",
         "List TV 3's shrines (demos, tutorials and Skills Canada)",
-        "List TV 4's own shrines (the hallway also shows all of TV 1-3's)"]
+        "List TV 4's own shrines (the hallway also shows all of TV 1-3's)", "Search by name"]
     assert "TV 4 has no shrines of its own on pi-files." in screen.shown("info")
     assert seen["TV 1's 2 shrines. Which one?"] == ["ann.lee", "bo.ng", "Search or list again"]
     assert len(opened) == 1
@@ -628,10 +628,10 @@ def _made_shrine(pi_files, the_tvs):
 def test_rename_a_shrine_without_making_its_videos_again(monkeypatch, pi_files, the_tvs):
     files = _made_shrine(pi_files, the_tvs)
     monkeypatch.setattr(tvs, "_get_ffmpeg", lambda settings: pytest.fail("made videos again"))
-    screen = Screen(monkeypatch, asks=["ann", "Ann.Smith"], chooses=["search", ANN, 1],
+    screen = Screen(monkeypatch, asks=["ann", "Ann.Smith"], chooses=["search", ANN],
                     confirms=[False])
     tvs.rename_shrine(TvsSettings())
-    screen.finished()
+    screen.finished()  # it stays on its TV, without asking
     assert not files.exists("/mnt/ssd/tv1/ann.lee")
     assert sorted(files.list_folder("/mnt/ssd/tv1/ann.smith")[1]) == [
         "ann.smith.a.title.png", "ann.smith.z.clip.mov", "ann.smith.z.red.jpg", "notes.mp4"]
@@ -639,15 +639,15 @@ def test_rename_a_shrine_without_making_its_videos_again(monkeypatch, pi_files, 
                "ann.smith.z.notes.mp4": b"notes video"}
     for number in (1, 4):
         assert the_tvs[number].files == renamed
-    assert "Which TV is it for? (It's on TV 1 now; going by its name, TV 2.)" in \
-        screen.questions  # Enter keeps it where it is
+    assert "Renaming ann.lee (on TV 1)." in screen.shown("info")
+    assert "Type its new username, e.g. firstname.lastname" in screen.questions
     assert "Its title card has ann.lee's name on it. Make a new one?" in screen.questions
 
 
 def test_rename_a_shrine_with_a_new_title_card(monkeypatch, pi_files, the_tvs, ffmpeg_path):
     files = _made_shrine(pi_files, the_tvs)
     screen = Screen(monkeypatch, asks=["ann", "bo.zed", "", "2027"],
-                    chooses=["search", ANN, 1, "Digital Art"], confirms=[True])
+                    chooses=["search", ANN, "Digital Art"], confirms=[True])
     tvs.rename_shrine(TvsSettings(ffmpeg=str(ffmpeg_path)))
     screen.finished()
     assert files.files["/mnt/ssd/tv1/bo.zed/bo.zed.a.title.png"] != b"title"  # a new one
@@ -658,13 +658,35 @@ def test_rename_a_shrine_with_a_new_title_card(monkeypatch, pi_files, the_tvs, f
 def test_move_a_shrine_to_another_tv(monkeypatch, pi_files, the_tvs):
     files = _made_shrine(pi_files, the_tvs)
     monkeypatch.setattr(tvs, "_get_ffmpeg", lambda settings: pytest.fail("made videos again"))
-    screen = Screen(monkeypatch, asks=["ann", "ann.lee"], chooses=["search", ANN, 2])
-    tvs.rename_shrine(TvsSettings())
+    screen = Screen(monkeypatch, asks=["ann"], chooses=["search", ANN, 2])
+    tvs.move_shrine(TvsSettings())
     screen.finished()
+    assert "Move it to which TV? (It's on TV 1 now.)" in screen.questions
+    assert not files.exists("/mnt/ssd/tv1/ann.lee")
     assert files.exists("/mnt/ssd/tv2/ann.lee/ann.lee.a.title.png")
     assert the_tvs[1].files == {}  # taken off its old TV
     assert sorted(the_tvs[2].files) == sorted(the_tvs[4].files) == [
         "ann.lee.a.mp4", "ann.lee.z.clip.mp4", "ann.lee.z.notes.mp4"]
+
+
+def test_moving_a_shrine_suggests_the_tv_its_name_goes_on(monkeypatch, pi_files, the_tvs):
+    _made_shrine(pi_files, the_tvs)
+    pi_files.connection.add("/mnt/ssd/tv1/mo.zed/mo.zed.z.cat.png")  # Z: TV 2, not TV 1
+    mo = ArtFolder(1, "/mnt/ssd/tv1/mo.zed", "mo.zed")
+    defaults = []
+    real_choose = Screen._choose
+
+    def choose(self, choices, question="", default=None):
+        defaults.append(default)
+        return real_choose(self, choices, question)
+    monkeypatch.setattr(Screen, "_choose", choose)
+    screen = Screen(monkeypatch, asks=["mo"], chooses=["search", mo, 1])
+    tvs.move_shrine(TvsSettings())
+    screen.finished()
+    assert "Move it to which TV? (It's on TV 1 now; going by its name, TV 2.)" in \
+        screen.questions
+    assert defaults[-1] == 2  # Enter moves it there
+    assert "It's on TV 1 already, so nothing's changed." in screen.shown("info")
 
 
 def test_rename_to_a_name_thats_taken(monkeypatch, pi_files, the_tvs):
@@ -691,7 +713,8 @@ def test_the_menu():
     assert [title for title, _ in tvs.ACTIONS] == [
         "Make a shrine (a student's art, or a collection)", "Add art to a shrine",
         "List, View, and/or Delete a Shrine's Art",
-        "Rename a shrine (e.g. to a different username)", "Remove a shrine",
+        "Rename a shrine (e.g. to a different username)", "Move a shrine to another TV",
+        "Remove a shrine",
         "Update the TVs from pi-files", "Turn TVs on or off",
         "Restart a TV's slideshow, or reboot it",
         "TV Art Shrines documentation"]
