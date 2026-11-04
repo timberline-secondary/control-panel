@@ -383,27 +383,41 @@ def add_screen(monkeypatch, tmp_path):
     for kind in ["success", "info", "warning", "error"]:
         monkeypatch.setattr(themes.ui, kind, lambda text, kind=kind: messages.append(text))
 
+    prompts = []
+
     def run(asks, chooses=(), confirms=()):
         asks, chooses, confirms = iter(asks), iter(chooses), iter(confirms)
-        monkeypatch.setattr(themes.ui, "ask", lambda prompt, **k: next(asks))
+        monkeypatch.setattr(themes.ui, "ask",
+                            lambda prompt, **k: prompts.append(prompt) or next(asks))
         monkeypatch.setattr(themes.ui, "choose", lambda *a, **k: next(chooses))
         monkeypatch.setattr(themes.ui, "confirm", lambda prompt, **k: next(confirms))
         themes.add_theme(pi)
         for left in (asks, chooses, confirms):  # every scripted answer was asked for
             assert next(left, "done") == "done"
 
+    run.prompts = prompts
     return run, str(song), connection.files, messages
 
 
 def test_add_theme_using_the_suggested_code(add_screen):
     run, song, files, messages = add_screen
-    run(asks=[song, ""], chooses=["replace"], confirms=[False])  # Enter takes 0027
+    run(asks=[song, "", None], chooses=["replace"])  # Enter takes 0027, then q
     assert files["/mnt/usb0/0027.mp3"] == ID3_MP3
+
+
+def test_after_adding_a_theme_it_asks_for_the_next_one(add_screen):
+    run, song, files, messages = add_screen
+    run(asks=[song, "0042", song, "0043", None])  # no "Add another?" in between
+    assert files["/mnt/usb0/0042.mp3"] == files["/mnt/usb0/0043.mp3"] == ID3_MP3
+    links = [p for p in run.prompts if "mp3 file into this window" in p]
+    assert links == ["Paste a link, or drag an mp3 file into this window",
+                     "To add another, paste a link or drag an mp3 file into this window",
+                     "To add another, paste a link or drag an mp3 file into this window"]
 
 
 def test_add_theme_with_a_different_code_after_a_clash(add_screen):
     run, song, files, messages = add_screen
-    run(asks=[song, "", "0042"], chooses=["different"], confirms=[False])
+    run(asks=[song, "", "0042", None], chooses=["different"])
     assert files["/mnt/usb0/0042.mp3"] == ID3_MP3
     assert files["/mnt/usb0/0027.mp3"] == b""  # untouched
 

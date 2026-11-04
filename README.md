@@ -26,7 +26,7 @@ and press Enter, or `q` to go back (or quit, from the main menu). Questions end 
 `, or (q)uit:`, and show what Enter does if it does something, like
 `Type their grad year (Enter = 2027), or (q)uit:`. Yes-or-no questions are `(Y/n)` or `(y/N)`,
 the capital letter being what Enter means. Where you can pick several TVs, type their numbers,
-like `1 4` or `2-3` or `all`. When a task is done and has something to read, press Enter to go back to the panel (if its last step was a question, like `Add another theme? (Y/n)`, answering it goes straight back). In a menu that suggests an item, like the TV a shrine goes on, it shows `Choose an item (Enter = 2), or (q)uit:`.
+like `1 4` or `2-3` or `all`. When a task is done and has something to read, press Enter to go back to the panel (if its last step was a question, like *Add a new theme*'s `To add another, paste a link or drag an mp3 file into this window, or (q)uit:`, answering `q` goes straight back). In a menu that suggests an item, like the TV a shrine goes on, it shows `Choose an item (Enter = 2), or (q)uit:`.
 
 The first time you connect to a Pi you'll be asked for its password. If you're on your own
 Windows login (not a shared one), you can have Windows remember it in Credential Manager. The
