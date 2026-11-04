@@ -391,8 +391,9 @@ def speak(pi: ThemesPi) -> None:
 
 def add_theme(pi: ThemesPi) -> None:
     ui.info("Add a theme from a link to an mp3, or from an mp3 file on this computer.")
+    prompt = "Paste a link, or drag an mp3 file into this window"
     while True:
-        source = ui.ask("Paste a link, or drag an mp3 file into this window")
+        source = ui.ask(prompt)
         if source is None:
             return
         if not source:
@@ -430,8 +431,7 @@ def add_theme(pi: ThemesPi) -> None:
             ui.success(f"Added! Type {code} on the entrance keypad to play it.")
         else:
             ui.success(f"Added! Play it by typing {code} in 'Play a theme'.")
-        if not ui.confirm("Add another theme?", default=True):
-            return
+        prompt = "To add another, paste a link or drag an mp3 file into this window"
 
 
 def remove_theme(pi: ThemesPi) -> None:
