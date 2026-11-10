@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from control_panel import shrine
+from control_panel import activity, shrine
 from control_panel.config import TvsSettings
 from control_panel.ssh import PiConnection
 
@@ -34,6 +34,7 @@ BACKUP = "backup"
 VIDEOS = ".videos"
 MADE_NOTE = ".made.json"  # in .videos: what its videos were made from
 DELETED = ".deleted.json"  # videos deleted on purpose, to take off TVs without backing up
+ORIGINS = ".origins.json"  # in backup: where each thing in it was before
 CHECK_FILE = ".control-panel-check"
 SPARE_SPACE = 1_000_000_000  # bytes to leave free on the drive
 PICTURE_TYPES = {".png", ".jpg", ".jpeg", ".jpe", ".jfif", ".jif", ".jfi", ".pjpeg", ".pjp",
@@ -47,6 +48,33 @@ Progress = Callable[[int, int], None]  # (bytes done, total)
 
 class ArtError(Exception):
     """Something the person can fix. The message says what."""
+
+
+@dataclass(frozen=True)
+class Backup:
+    """Something in pi-files' backup folder: a removed shrine, a deleted or replaced piece,
+    or a video taken off a TV."""
+
+    name: str  # in the backup folder: <yyyymmdd>-<hhmmss>-<what it was called>
+    is_folder: bool
+    size: int  # bytes (a folder's are added up)
+    origin: str | None  # where it was, if that was noted (backups from before v0.9 aren't)
+
+    @property
+    def when(self) -> datetime.datetime | None:
+        try:
+            return datetime.datetime.strptime(self.name[:15], "%Y%m%d-%H%M%S")
+        except ValueError:
+            return None
+
+    @property
+    def label(self) -> str:
+        """What it was called: 'ann.lee', 'ann.lee.z.sun.jpg', or 'tv1-clip.mp4' for a video
+        taken off TV 1."""
+        label = self.name[16:] if self.when else self.name
+        if not self.is_folder:  # backup_path adds -2, -3... after a name that's taken
+            label = re.sub(r"(\.[A-Za-z0-9]+)-\d+$", r"\1", label)
+        return label
 
 
 @dataclass(frozen=True)
@@ -398,11 +426,61 @@ class ArtServer:
         self._mkdir(posixpath.join(self.root, BACKUP))
         target = self.backup_path(label)
         self._rename(path, target)
+        self._note_origin(posixpath.basename(target), path)
         return target
 
     def put_back(self, aside: str, path: str) -> None:
         """Undo set_aside()."""
         self._rename(aside, path)
+        self._note_origin(posixpath.basename(aside), None)
+
+    def _origins_path(self) -> str:
+        return posixpath.join(self.root, BACKUP, ORIGINS)
+
+    def _note_origin(self, name: str, path: str | None) -> None:
+        origins = self.read_json(self._origins_path())
+        if path is None:
+            if origins.pop(name, None) is None:
+                return
+        else:
+            origins[name] = path
+        self.write_json(self._origins_path(), origins)
+
+    def backups(self) -> list[Backup]:
+        """What's in the backup folder, newest first."""
+        folder = posixpath.join(self.root, BACKUP)
+        folders, files = self._list(folder)
+        origins = self.read_json(self._origins_path())
+        sizes = {}
+        if folders:
+            result = self.connection.run(
+                f"cd {shlex.quote(folder)} && du -s -B1 -- {' '.join(map(shlex.quote, folders))}")
+            for line in result.output.splitlines():
+                size, _, name = line.partition("\t")
+                if size.isdigit():
+                    sizes[name] = int(size)
+        found = [Backup(f, True, sizes.get(f, 0), origins.get(f)) for f in folders] + [
+            Backup(f, False, size, origins.get(f)) for f, size in files.items()]
+        return sorted((b for b in found if not b.name.startswith(".")),
+                      key=lambda b: (b.when or datetime.datetime.min, b.name), reverse=True)
+
+    def restore(self, backup: Backup, path: str) -> None:
+        """Move something in the backup folder back to path (making its folder if need be)."""
+        for folder in _below(self.root, posixpath.dirname(path)):
+            self._mkdir(folder)
+        self._rename(posixpath.join(self.root, BACKUP, backup.name), path)
+        self._note_origin(backup.name, None)
+
+    def delete_backup(self, backup: Backup) -> None:
+        self.delete(posixpath.join(self.root, BACKUP, backup.name))
+        self._note_origin(backup.name, None)
+
+    def log(self, text: str) -> None:
+        """Note a change in pi-files' activity log."""
+        activity.record(self.connection, self.log_path(), text)
+
+    def log_path(self) -> str:
+        return posixpath.join(self.root, activity.LOG_NAME)
 
     def deleted(self) -> set[str]:
         """Videos deleted on purpose that may still be on a TV that was off."""

@@ -397,7 +397,7 @@ def test_sync_copies_whats_missing_and_backs_up_what_isnt_on_pi_files(monkeypatc
     tvs._sync(tv, pi_files, wanted, {"deleted.mp4"}, {})
     assert connection.files == {"ann.lee.a.mp4": b"new slideshow", "same.mp4": b"same",
                                 "bo.ng.a.mp4": b"bo"}
-    backup = pi_files.connection.list_folder("/mnt/ssd/backup")[1]
+    backup = pi_files.connection.backup_files()
     assert len(backup) == 1 and next(iter(backup)).endswith("-tv1-stray.mp4")  # only it
     assert "  stray.mp4 (" in screen.shown("info")  # listed, unlike deleted.mp4
     assert "  deleted.mp4 (" not in screen.shown("info")
@@ -506,7 +506,7 @@ def test_add_art_skips_whats_there_and_replaces_same_names(tmp_path, monkeypatch
     assert sorted(files.list_folder("/mnt/ssd/tv1/ann.lee")[1]) == [
         "ann.lee.z.moon.png", "ann.lee.z.red.jpg", "ann.lee.z.sun.png"]
     assert files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.sun.png"] == (new / "sun.png").read_bytes()
-    backup = files.list_folder("/mnt/ssd/backup")[1]
+    backup = files.backup_files()
     assert [f.endswith("-ann.lee.z.sun.png") for f in backup] == [True]
     assert "Already on pi-files: red.jpg" in screen.shown("info")
     assert updated == [ANN]
@@ -539,9 +539,32 @@ def test_see_a_piece_then_delete_it(tmp_path, monkeypatch, pi_files):
     screen.finished()
     assert opened == [(tmp_path / "blue.png").read_bytes(), (tmp_path / "red.jpg").read_bytes()]
     assert red not in files.files and blue in files.files
-    assert [f.endswith("-ann.lee.z.red.jpg") for f in files.list_folder("/mnt/ssd/backup")[1]] \
+    assert [f.endswith("-ann.lee.z.red.jpg") for f in files.backup_files()] \
         == [True]
     assert updated == [ANN]  # the slideshow's made again, and its TVs updated
+
+
+def test_open_a_shrines_whole_folder(tmp_path, monkeypatch, pi_files):
+    files = _shrine_on_pi_files(pi_files, tmp_path)
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.what?.png", b"odd name")
+    before = dict(files.files)
+    opened = []
+    monkeypatch.setattr(tvs, "open_file", opened.append)
+    (tmp_path / "temp").mkdir()
+    monkeypatch.setattr(tvs.tempfile, "gettempdir", lambda: str(tmp_path / "temp"))
+    monkeypatch.setattr(tvs, "update_shrine", lambda *a, **k: pytest.fail("updated the TVs"))
+    screen = Screen(monkeypatch, asks=["ann"], chooses=["search", ANN, tvs.FOLDER, None])
+    tvs.view_art(TvsSettings())
+    screen.finished()
+    (folder,) = opened
+    assert folder == tmp_path / "temp" / "hackerspace-shrines" / "ann.lee"
+    assert sorted(f.name for f in folder.iterdir()) == [
+        "ann.lee.a.title.png", "ann.lee.z.blue.png", "ann.lee.z.red.jpg", "ann.lee.z.spin.gif",
+        "ann.lee.z.what_.png"]  # ? isn't allowed in a Windows file name
+    assert (folder / "ann.lee.z.red.jpg").read_bytes() == \
+        files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.red.jpg"]
+    assert files.files == before  # nothing changed on pi-files
+    assert "Changes there don't change the shrine" in screen.shown("info")
 
 
 def test_looking_without_deleting_changes_nothing(tmp_path, monkeypatch, pi_files):
@@ -700,6 +723,105 @@ def test_rename_to_a_name_thats_taken(monkeypatch, pi_files, the_tvs):
     assert files.files == before
 
 
+# --- Backups, checking the TVs, and the activity log -----------------------------------------
+
+def test_put_back_a_removed_shrine(monkeypatch, pi_files, the_tvs):
+    files = _made_shrine(pi_files, the_tvs)
+    monkeypatch.setattr(tvs, "_get_ffmpeg", lambda settings: pytest.fail("made videos again"))
+    Screen(monkeypatch, asks=["ann.lee"], chooses=[ANN, "backup"])
+    tvs.remove_shrine(TvsSettings())
+    assert the_tvs[1].files == the_tvs[4].files == {}
+    (backup,) = pi_files.backups()
+    assert backup.origin == "/mnt/ssd/tv1/ann.lee" and backup.label == "ann.lee"
+    screen = Screen(monkeypatch, asks=["ann"], chooses=["restore", backup], confirms=[True])
+    tvs.backups(TvsSettings())
+    screen.finished()
+    assert files.exists("/mnt/ssd/tv1/ann.lee/ann.lee.z.red.jpg")
+    assert pi_files.backups() == []
+    for number in (1, 4):  # back on its TV and the hallway, without making videos again
+        assert sorted(the_tvs[number].files) == [
+            "ann.lee.a.mp4", "ann.lee.z.clip.mp4", "ann.lee.z.notes.mp4"]
+    log = files.files["/mnt/ssd/activity.log"].decode()
+    assert "Removed the shrine ann.lee (TV 1), kept in backup" in log
+    assert "Put back ann.lee from backup, as /mnt/ssd/tv1/ann.lee" in log
+
+
+def test_put_back_a_piece_backed_up_before_origins_were_noted(monkeypatch, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.red.jpg")
+    files.add("/mnt/ssd/backup/20260101-120000-ann.lee.z.sun.jpg", b"sun")
+    files.add("/mnt/ssd/backup/20260101-120001-ann.lee.z.red.jpg", b"older red")
+    updated = []
+    monkeypatch.setattr(tvs, "update_shrine", lambda settings, server, art, **k:
+                        updated.append(art))
+    sun, red = sorted(pi_files.backups(), key=lambda b: b.name)
+    assert tvs.describe_backup(sun) == "Jan 01, 2026 12:00  piece ann.lee.z.sun.jpg (0.0 MB)"
+    Screen(monkeypatch, asks=["sun"], chooses=["restore", sun], confirms=[True])
+    tvs.backups(TvsSettings())
+    assert files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.sun.jpg"] == b"sun"
+    # A piece with the same name is there now, so it comes back under another name.
+    Screen(monkeypatch, asks=["red"], chooses=["restore", red], confirms=[True])
+    tvs.backups(TvsSettings())
+    assert files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.red-restored.jpg"] == b"older red"
+    assert files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.red.jpg"] == b"art"  # untouched
+    assert updated == [ANN, ANN]
+
+
+def test_put_back_an_old_shrine_asks_which_tv(monkeypatch, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/backup/20260101-120000-bo.zed/bo.zed.z.cat.png", b"cat")
+    monkeypatch.setattr(tvs, "update_shrine", lambda *a, **k: None)
+    (old,) = pi_files.backups()
+    screen = Screen(monkeypatch, asks=[""], chooses=["restore", old, 2], confirms=[True])
+    tvs.backups(TvsSettings())
+    screen.finished()
+    assert "Which TV is it for? (TV 2, going by its name.)" in screen.questions
+    assert files.files["/mnt/ssd/tv2/bo.zed/bo.zed.z.cat.png"] == b"cat"
+
+
+def test_delete_old_backups(monkeypatch, pi_files):
+    files = pi_files.connection
+    files.add("/mnt/ssd/backup/20200101-120000-ann.lee/ann.lee.z.sun.jpg", b"x" * 1_000_000)
+    files.add("/mnt/ssd/backup/20200102-120000-bo.zed.z.cat.png", b"y" * 500_000)
+    recent = f"{tvs.datetime.datetime.now():%Y%m%d-%H%M%S}-cy.mo.z.dog.png"
+    files.add(f"/mnt/ssd/backup/{recent}", b"z")
+    screen = Screen(monkeypatch, asks=["6"], chooses=["clean"], confirms=[True])
+    tvs.backups(TvsSettings())
+    screen.finished()
+    assert [b.name for b in pi_files.backups()] == [recent]
+    assert "2 thing(s) older than 6 month(s), 1.5 MB:" in screen.shown("info")
+    assert "Deleted 2 backup(s) older than 6 month(s)" in \
+        files.files["/mnt/ssd/activity.log"].decode()
+
+
+def test_check_the_tvs_changes_nothing(monkeypatch, pi_files, the_tvs):
+    files = _made_shrine(pi_files, the_tvs)
+    files.add("/mnt/ssd/tv2/bo.zed/bo.zed.z.cat.png")  # art, but no videos made yet
+    del the_tvs[1].files["ann.lee.z.clip.mp4"]
+    the_tvs[4].files["stray.mp4"] = b"stray"
+    before = {n: dict(tv.files) for n, tv in the_tvs.items()}
+    before_files = dict(files.files)
+    screen = Screen(monkeypatch, picks=[[1, 2, 4]])
+    tvs.check_tvs(TvsSettings())
+    assert {n: tv.files for n, tv in the_tvs.items()} == before
+    assert files.files == before_files
+    shown = screen.shown()
+    assert "bo.zed (TV 2) has art, but its videos haven't been made yet." in shown
+    assert "  1 missing or out of date: ann.lee.z.clip.mp4" in shown
+    assert "TV 2: up to date (0 videos" in shown
+    assert "  1 not on pi-files: stray.mp4" in shown
+    assert "'Update the TVs from pi-files' brings them up to date." in shown
+
+
+def test_recent_changes(monkeypatch, pi_files):
+    pi_files.log("Made the shrine ann.lee (TV 1), with 3 piece(s) of art")
+    pi_files.log("Made the shrine bo.zed (TV 2), with 1 piece(s) of art")
+    screen = Screen(monkeypatch, asks=["ann"])
+    tvs.recent_changes(TvsSettings())
+    shown = screen.shown("info")
+    assert "Made the shrine ann.lee (TV 1)" in shown and "bo.zed" not in shown
+
+
 def test_update_the_tvs(monkeypatch, pi_files):
     updated = []
     monkeypatch.setattr(tvs, "update_tvs", lambda settings, server, numbers:
@@ -714,10 +836,11 @@ def test_the_menu():
         "Make a shrine (a student's art, or a collection)", "Add art to a shrine",
         "List, View, and/or Delete a Shrine's Art",
         "Rename a shrine (e.g. to a different username)", "Move a shrine to another TV",
-        "Remove a shrine",
+        "Remove a shrine", "Backups: put something back, or delete old ones",
+        "Check the TVs (what's on them, compared with pi-files)",
         "Update the TVs from pi-files", "Turn TVs on or off",
         "Restart a TV's slideshow, or reboot it",
-        "TV Art Shrines documentation"]
+        "Recent changes (who changed what, and when)", "TV Art Shrines documentation"]
 
 
 def test_problems_are_reported_not_crashes(monkeypatch):
