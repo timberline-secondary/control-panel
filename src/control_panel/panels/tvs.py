@@ -1430,6 +1430,10 @@ def _clean_up(server: ArtServer, items: list[Backup]) -> None:
     ui.success(f"Deleted them, making {size_text(sum(b.size for b in old))} of room.")
 
 
+def _videos(count: int) -> str:
+    return f"{count} video{'' if count == 1 else 's'}"
+
+
 def check_tvs(settings: TvsSettings) -> None:
     """Compare what's on the TVs with what pi-files says they should show, changing
     nothing."""
@@ -1469,9 +1473,9 @@ def _report(tv: TvPi, wanted: dict[str, tuple[str, int]]) -> bool:
     free = tv.free_space()
     room = f", {size_text(free)} free" if free is not None else ""
     if not missing and not extra:
-        ui.success(f"{tv.name}: up to date ({len(wanted)} videos{room}).")
+        ui.success(f"{tv.name}: up to date ({_videos(len(wanted))}{room}).")
         return True
-    ui.warning(f"{tv.name}: {len(playing)} videos{room}.")
+    ui.warning(f"{tv.name}: {_videos(len(playing))}{room}.")
     for label, names in (("missing or out of date", missing), ("not on pi-files", extra)):
         if names:
             shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5

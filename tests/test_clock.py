@@ -430,11 +430,19 @@ def test_change_todays_schedule_then_go_back_to_the_usual_one(pi, monkeypatch):
     assert len(restarts(pi)) == 1  # without asking
     assert "Today (2026-10-22): the clock shows Flex" in log(pi)
 
-    screen = Screen(monkeypatch, chooses=[named("Go back to the usual")])
+    offered = []
+
+    def go_back(choices):
+        offered.extend(title for title, _ in choices)
+        return named("Go back to the usual")(choices)
+
+    screen = Screen(monkeypatch, chooses=[go_back])
     clock.change_today(pi)
     assert "the clock shows Flex, instead of the usual 4-Block." in screen.text("info")
+    assert not any(title.startswith("4-Block (") for title in offered)  # only as "Go back"
     assert all("2026-10-22" not in s.get("dates", []) for s in saved(pi))
     assert clock.for_date(saved(pi), THURSDAY)["description"] == "4-Block"
+    assert "the clock shows 4-Block (back to the usual)" in log(pi)
 
 
 def test_show_a_message_then_take_it_off(pi, monkeypatch):

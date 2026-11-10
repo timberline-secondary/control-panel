@@ -659,7 +659,7 @@ def recent_changes(pi: ThemesPi) -> None:
 
 def _ask_code(suggestion: str | None) -> str | None:
     while True:
-        code = ui.ask("What code should play it?", default=suggestion or "")
+        code = ui.ask("Type the keypad code that should play it", default=suggestion or "")
         if code is None:
             return None
         code = code or suggestion or ""

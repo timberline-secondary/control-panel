@@ -629,9 +629,10 @@ def change_today(pi: ClockPi) -> None:
     else:
         ui.info(f"Today ({date_text(today.isoformat())}) the clock shows {name(now)}, instead "
                 f"of the usual {name(usual) if usual else 'none'}.")
+    back = now is not usual and usual is not None  # offered once, as "Go back to the usual"
     choices = [(f"{name(s)} ({days_text(s.get('days', []))})", s) for s in schedules
-               if s is not now]
-    if now is not usual and usual is not None:
+               if s is not now and not (back and s is usual)]
+    if back:
         choices.append((f"Go back to the usual schedule ({name(usual)})", "usual"))
     picked = ui.choose(choices, "Which schedule should the clock show today?")
     if picked is None:
@@ -642,8 +643,8 @@ def change_today(pi: ClockPi) -> None:
     shown = usual if picked == "usual" else picked
     if picked != "usual":
         picked["dates"] = sorted({*picked.get("dates", []), today.isoformat()})
-    _save(pi, schedules, f"Today ({today.isoformat()}): the clock shows {name(shown)}",
-          restart_now=True)
+    _save(pi, schedules, f"Today ({today.isoformat()}): the clock shows {name(shown)}"
+          + (" (back to the usual)" if picked == "usual" else ""), restart_now=True)
     ui.success(f"Today the clock shows {name(shown)}.")
 
 
