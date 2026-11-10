@@ -544,6 +544,29 @@ def test_see_a_piece_then_delete_it(tmp_path, monkeypatch, pi_files):
     assert updated == [ANN]  # the slideshow's made again, and its TVs updated
 
 
+def test_open_a_shrines_whole_folder(tmp_path, monkeypatch, pi_files):
+    files = _shrine_on_pi_files(pi_files, tmp_path)
+    files.add("/mnt/ssd/tv1/ann.lee/ann.lee.z.what?.png", b"odd name")
+    before = dict(files.files)
+    opened = []
+    monkeypatch.setattr(tvs, "open_file", opened.append)
+    (tmp_path / "temp").mkdir()
+    monkeypatch.setattr(tvs.tempfile, "gettempdir", lambda: str(tmp_path / "temp"))
+    monkeypatch.setattr(tvs, "update_shrine", lambda *a, **k: pytest.fail("updated the TVs"))
+    screen = Screen(monkeypatch, asks=["ann"], chooses=["search", ANN, tvs.FOLDER, None])
+    tvs.view_art(TvsSettings())
+    screen.finished()
+    (folder,) = opened
+    assert folder == tmp_path / "temp" / "hackerspace-shrines" / "ann.lee"
+    assert sorted(f.name for f in folder.iterdir()) == [
+        "ann.lee.a.title.png", "ann.lee.z.blue.png", "ann.lee.z.red.jpg", "ann.lee.z.spin.gif",
+        "ann.lee.z.what_.png"]  # ? isn't allowed in a Windows file name
+    assert (folder / "ann.lee.z.red.jpg").read_bytes() == \
+        files.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.red.jpg"]
+    assert files.files == before  # nothing changed on pi-files
+    assert "Changes there don't change the shrine" in screen.shown("info")
+
+
 def test_looking_without_deleting_changes_nothing(tmp_path, monkeypatch, pi_files):
     files = _shrine_on_pi_files(pi_files, tmp_path)
     before = dict(files.files)

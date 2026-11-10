@@ -20,8 +20,8 @@ yes and it downloads the new version, swaps it in and restarts. (You can also ru
 
 ## Using it
 
-The main menu has four panels: **TV Art Shrines**, **Entrance Theme Machine**, **Grade 9
-Mode** and **Projector Clock**. Each panel clears the screen and shows its heading, then a numbered menu: type a number
+The main menu has four panels: **TV Art Shrines**, **Entrance Theme Machine**, **Projector
+Clock** and **Grade 9 Mode**. Each panel clears the screen and shows its heading, then a numbered menu: type a number
 and press Enter, or `q` to go back (or quit, from the main menu). Questions end with
 `, or (q)uit:`, and show what Enter does if it does something, like
 `Type their grad year (Enter = 2027), or (q)uit:`. Yes-or-no questions are `(Y/n)` or `(y/N)`,
@@ -63,7 +63,7 @@ sound) is used as it is, under the same name; others are converted, and the app 
 | --- | --- |
 | Make a shrine | For a student (username, name, grad year, subject) or a collection (e.g. Skills Canada, with or without a title card). Pick its TV, then drag in their folder or files, or paste links to pictures, videos or `.zip` files (a OneDrive/Teams folder downloads as a `.zip`). The student's own files are never moved or changed. |
 | Add art to a shrine | Type part of their username, then drag in or paste the new art. Art that's already there is skipped, so you can drag in their whole folder again; if some pieces have the same names as old ones, it asks whether to replace them (the old ones go to `backup`) or keep both. |
-| List, View, and/or Delete a Shrine's Art | Search for a shrine by name, or list the shrines on a TV and pick one. Then it lists their art (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player); then you can delete it (it's moved to `backup`). |
+| List, View, and/or Delete a Shrine's Art | Search for a shrine by name, or list the shrines on a TV and pick one. Then it lists their art (title card first, then the pictures in slideshow order, then videos). Pick a piece and it opens in its usual app (Photos, a video player); then you can delete it (it's moved to `backup`). Or pick *Open the whole folder* to get a copy of all their art in a folder on this computer, opened in File Explorer, to browse it all at once (changing the copy doesn't change the shrine). |
 | Rename a shrine (e.g. to a different username) | Type its new name. Its folder on pi-files is renamed, and its art and videos with it (`old.name.z.sun.jpg` becomes `new.name.z.sun.jpg`; files not named after it, like `notes.mp4`, keep their names), so nothing is made again. If it has a title card, you can make a new one with the new name. Then its old videos come off the TVs and the renamed ones go on. It stays on the same TV. |
 | Move a shrine to another TV | Its folder on pi-files moves to the TV you pick (Enter picks the one its name goes on, if it's on another), its videos come off its old TV and go on the new one. The hallway shows it either way. |
 | Remove a shrine | Takes it off the TVs, and either moves its art to `backup` (so it can be put back) or deletes it for good. |

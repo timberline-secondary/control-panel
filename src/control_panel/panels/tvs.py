@@ -1088,11 +1088,15 @@ def view_art(settings: TvsSettings) -> None:
                 pictures = order([p for p in files if is_picture(p)], name)
                 others = sorted((p for p in files if not is_picture(p)),
                                 key=lambda p: shrine.natural_key(piece(p, name)))
-                path = ui.choose([(_describe(p, files[p]), p) for p in pictures + others],
-                                 f"{art.folder}'s art (TV {art.tv}). Which piece do you want "
-                                 "to see?")
+                path = ui.choose(
+                    [(_describe(p, files[p]), p) for p in pictures + others]
+                    + [(f"Open the whole folder ({len(files)} pieces) in File Explorer", FOLDER)],
+                    f"{art.folder}'s art (TV {art.tv}). Which piece do you want to see?")
                 if path is None:
                     break
+                if path == FOLDER:
+                    _open_folder(server, art, files)
+                    continue
                 file_name = posixpath.basename(path)
                 local = viewing / f"{len(list(viewing.iterdir())) + 1:02d}" \
                     f"{posixpath.splitext(path)[1].lower()}"
@@ -1110,6 +1114,31 @@ def view_art(settings: TvsSettings) -> None:
             shutil.rmtree(viewing, ignore_errors=True)  # whatever a viewer isn't holding open
         if deleted:
             update_shrine(settings, server, art)
+
+
+FOLDER = "folder"  # in view_art's list: open all of a shrine's art at once
+
+
+def _open_folder(server: ArtServer, art: ArtFolder, files: dict[str, int]) -> None:
+    """Copy a shrine's art to a folder on this computer and open it, to browse it all at once.
+    (pi-files' folders can't be opened from Windows directly.)"""
+    local = Path(tempfile.gettempdir()) / "hackerspace-shrines" / _windows_name(art.folder)
+    shutil.rmtree(local, ignore_errors=True)  # an older copy
+    local.mkdir(parents=True, exist_ok=True)
+    total, got = sum(files.values()) or 1, 0
+    with on_pi_files(server), ui.progress(f"Getting {art.folder}'s {len(files)} pieces") as update:
+        for path, size in files.items():
+            server.download(path, local / _windows_name(posixpath.basename(path)),
+                            lambda done, _, before=got: update((before + done) / total))
+            got += size
+    open_file(local)
+    ui.info(f"Opened a copy of {art.folder}'s art ({local}). Changes there don't change the "
+            "shrine: to delete a piece, pick it here.")
+
+
+def _windows_name(name: str) -> str:
+    """A file name Windows allows (pi-files' can have : ? * and such in them)."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).rstrip(" .") or "_"
 
 
 def _describe(path: str, size: int) -> str:
