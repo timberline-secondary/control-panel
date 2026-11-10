@@ -20,7 +20,7 @@ from typing import Any
 
 import paramiko
 
-from control_panel import login, ui
+from control_panel import activity, login, ui
 from control_panel.config import ClockSettings, Config
 from control_panel.ssh import CommandResult, ConnectionFailed, PiConnection
 
@@ -28,6 +28,7 @@ TITLE = "Projector Clock"
 DOCS = "https://github.com/timberline-secondary/jsclock#schedules"
 
 SAVED = "schedules.js"  # the schedules saved on the Pi (what the clock uses, if it's there)
+MESSAGE = "message.js"  # a message the clock shows instead of the joke, until a time
 DEFAULTS = "schedule_data.js"  # the clock's own schedules, used until some are saved
 BACKUPS = "backups"
 LAUNCHER = "launcher.sh"  # starts the browser showing the clock
@@ -274,10 +275,46 @@ class ClockPi:
 
     def can_use_saved(self) -> bool:
         """Whether this version of the clock reads the schedules saved in schedules.js."""
+        return self.can("localSchedules")
+
+    def can(self, feature: str) -> bool:
+        """Whether this version of the clock has a feature: localSchedules (it reads
+        schedules.js) or clockMessage (it shows message.js)."""
         try:
-            return "localSchedules" in self._read(self._path("clock_script.js"))
+            return feature in self._read(self._path("clock_script.js"))
         except FileNotFoundError:
             return False
+
+    def message(self) -> dict | None:
+        """The message the clock shows instead of the joke ({"text", "until"}), if it has one."""
+        path = self._path(MESSAGE)
+        if not self.connection.exists(path):
+            return None
+        text = self._read(path)
+        start, end = text.find("{"), text.rfind("}")
+        try:
+            message = json.loads(text[start:end + 1])
+        except ValueError:
+            return None
+        return message if isinstance(message, dict) and message.get("text") else None
+
+    def set_message(self, text: str, until: datetime.datetime | None) -> None:
+        message = {"text": text, **({"until": f"{until:%Y-%m-%dT%H:%M}"} if until else {})}
+        self.connection.upload(io.BytesIO(
+            ("// A message the clock shows instead of the joke, from the Hackerspace control "
+             f"panel.\nconst clockMessage = {json.dumps(message, ensure_ascii=False)};\n")
+            .encode()), self._path(MESSAGE))
+
+    def clear_message(self) -> None:
+        if self.connection.exists(self._path(MESSAGE)):
+            self.connection.remove(self._path(MESSAGE))
+
+    def log_path(self) -> str:
+        return self._path(activity.LOG_NAME)
+
+    def log(self, text: str) -> None:
+        """Note a change in pi-projector's activity log."""
+        activity.record(self.connection, self.log_path(), text)
 
     def load(self) -> list[Schedule]:
         """The clock's schedules: the saved ones, or else its own."""
@@ -567,9 +604,111 @@ def set_dates(pi: ClockPi) -> None:
         schedule["dates"] = sorted(set(kept) | set(dates))
     else:
         schedule["dates"] = [d for d in kept if d not in dates]
-    _save(pi, schedules, restart_now=today.isoformat() in dates)
     shown = "; ".join(date_text(d) for d in dates)
+    _save(pi, schedules, f"{name(schedule)}: {'added' if how == 'add' else 'removed'} the "
+          f"date(s) {shown}", restart_now=today.isoformat() in dates)
     ui.success(f"{name(schedule)}: {'added' if how == 'add' else 'removed'} {shown}.")
+
+
+def usual_for(schedules: list[Schedule], day: datetime.date) -> Schedule | None:
+    """The usual schedule for a day: the one for its day of the week, leaving out any set
+    for that particular date."""
+    weekday = (day.weekday() + 1) % 7  # the clock counts from Sunday
+    return next((s for s in schedules if weekday in s.get("days", [])), None)
+
+
+def change_today(pi: ClockPi) -> None:
+    schedules = pi.load()
+    today = _today()
+    now, usual = for_date(schedules, today), usual_for(schedules, today)
+    if now is None:
+        ui.info(f"Today ({date_text(today.isoformat())}) the clock has no schedule.")
+    elif now is usual:
+        ui.info(f"Today ({date_text(today.isoformat())}) the clock shows {name(now)}, the "
+                f"usual one for {DAYS[(today.weekday() + 1) % 7]}s.")
+    else:
+        ui.info(f"Today ({date_text(today.isoformat())}) the clock shows {name(now)}, instead "
+                f"of the usual {name(usual) if usual else 'none'}.")
+    choices = [(f"{name(s)} ({days_text(s.get('days', []))})", s) for s in schedules
+               if s is not now]
+    if now is not usual and usual is not None:
+        choices.append((f"Go back to the usual schedule ({name(usual)})", "usual"))
+    picked = ui.choose(choices, "Which schedule should the clock show today?")
+    if picked is None:
+        return
+    for schedule in schedules:
+        if today.isoformat() in schedule.get("dates", []):
+            schedule["dates"] = [d for d in schedule["dates"] if d != today.isoformat()]
+    shown = usual if picked == "usual" else picked
+    if picked != "usual":
+        picked["dates"] = sorted({*picked.get("dates", []), today.isoformat()})
+    _save(pi, schedules, f"Today ({today.isoformat()}): the clock shows {name(shown)}",
+          restart_now=True)
+    ui.success(f"Today the clock shows {name(shown)}.")
+
+
+def show_message(pi: ClockPi) -> None:
+    current = pi.message()
+    if current:
+        until = current.get("until")
+        ui.info(f"The clock shows: {current['text']}"
+                + (f" (until {until.replace('T', ' ')})" if until else " (until it's taken off)"))
+        what = ui.choose([("Change it", "change"), ("Take it off (back to jokes)", "clear")],
+                         "What do you want to do?")
+        if what is None:
+            return
+        if what == "clear":
+            pi.clear_message()
+            pi.log(f"Took the message off the clock ({current['text']})")
+            ui.success("Took it off.")
+            _restart(pi)
+            return
+    else:
+        ui.info("The clock shows your message where the joke usually is, until a time you "
+                "choose, then goes back to jokes.")
+    text = ui.ask("Type the message, e.g. Assembly in the gym at 10:30")
+    if not text:
+        return
+    until = _ask_until()
+    if until is None:
+        return
+    end = None if until == "never" else until
+    pi.set_message(text, end)
+    pi.log(f"Put a message on the clock: {text}"
+           + (f" (until {end:%Y-%m-%d %H:%M})" if end else ""))
+    ui.success("The clock will show it" + (f" until {end:%A %H:%M}." if end else
+                                           " until it's taken off."))
+    _restart(pi)
+
+
+def _ask_until() -> datetime.datetime | str | None:
+    """Until when to show a message: a time today (15:30), a date and time (11-12 15:30,
+    tomorrow 9:00), or never (until it's taken off). None if they go back."""
+    now = datetime.datetime.now()
+    while True:
+        text = ui.ask("Until when? e.g. 15:30, tomorrow 9:00 or 11-12 15:30 "
+                      "(Enter = the end of today; never = until it's taken off)")
+        if text is None:
+            return None
+        text = text.strip().lower()
+        if not text:
+            return now.replace(hour=23, minute=59, second=0, microsecond=0)
+        if text == "never":
+            return "never"
+        *day_text, time_text = text.rsplit(" ", 1) if " " in text else [text]
+        time = parse_time(time_text)
+        days = parse_dates(day_text[0], now.date()) if day_text else [now.date().isoformat()]
+        if time and days and len(days) == 1:
+            until = datetime.datetime.fromisoformat(f"{days[0]}T{time}")
+            if until > now:
+                return until
+            ui.error("That's already gone by.")
+            continue
+        ui.error("Type a time like 15:30, or a day and time like tomorrow 9:00 or 11-12 15:30.")
+
+
+def recent_changes(pi: ClockPi) -> None:
+    activity.show(pi.connection, pi.log_path())
 
 
 def new_schedule(pi: ClockPi) -> None:
@@ -586,7 +725,7 @@ def new_schedule(pi: ClockPi) -> None:
             "with 'Use a schedule on certain dates'.")
     if _edit(schedules, schedule):
         _claim_days(schedules, schedule, schedule["days"])
-        _save(pi, schedules)
+        _save(pi, schedules, f"Made the schedule {new_name}")
         ui.success(f"Saved {new_name}.")
 
 
@@ -595,7 +734,8 @@ def change_schedule(pi: ClockPi) -> None:
     schedule = _choose_schedule(schedules, "Which schedule?")
     if schedule is not None and _edit(schedules, schedule):
         _claim_days(schedules, schedule, schedule["days"])
-        _save(pi, schedules, restart_now=for_date(schedules, _today()) is schedule)
+        _save(pi, schedules, f"Changed the schedule {name(schedule)}",
+              restart_now=for_date(schedules, _today()) is schedule)
         ui.success(f"Saved {name(schedule)}.")
 
 
@@ -614,7 +754,7 @@ def remove_schedule(pi: ClockPi) -> None:
         return
     showing = for_date(schedules, _today()) is schedule
     schedules.remove(schedule)
-    _save(pi, schedules, restart_now=showing)
+    _save(pi, schedules, f"Removed the schedule {name(schedule)}", restart_now=showing)
     ui.success(f"Removed {name(schedule)}.")
 
 
@@ -636,7 +776,8 @@ def go_back(pi: ClockPi) -> None:
             ui.info(line)
     if ui.confirm("Go back to these schedules? (The ones now are kept as another version.)",
                   default=False):
-        _save(pi, schedules, restart_now=True)
+        _save(pi, schedules, f"Went back to the schedules from {_backup_time(picked)}",
+              restart_now=True)
         ui.success("Done: the clock has those schedules again.")
 
 
@@ -696,6 +837,7 @@ def _update(pi: ClockPi) -> None:
     if not (result := pi.match_github()).ok:
         raise ClockError(f"Couldn't update it: {hide_secrets(result.output.strip())}")
     ui.success("Updated the clock to its latest version.")
+    pi.log("Updated the clock from GitHub")
     _restart(pi)
 
 
@@ -713,11 +855,13 @@ def _reboot(pi: ClockPi) -> None:
         ui.error(f"Couldn't reboot: {result.output.strip() or result.exit_status}")
 
 
-def _save(pi: ClockPi, schedules: list[Schedule], *, restart_now: bool = False) -> None:
-    """Save the schedules, then restart the clock so it shows them (or offer to: otherwise
-    it reads them again at midnight)."""
+def _save(pi: ClockPi, schedules: list[Schedule], change: str, *,
+          restart_now: bool = False) -> None:
+    """Save the schedules (noting the change in the activity log), then restart the clock so
+    it shows them (or offer to: otherwise it reads them again at midnight)."""
     if pi.save(schedules):
         ui.info("(The schedules from before are kept as an earlier version.)")
+    pi.log(change)
     if restart_now or ui.confirm("Restart the clock now, so it uses them? (Otherwise it "
                                  "will at midnight.)", default=True):
         _restart(pi)
@@ -729,16 +873,22 @@ def docs() -> None:
 
 
 ACTIONS = [
+    ("Change today's schedule", change_today),
     ("See the schedules", see_schedules),
     ("Use a schedule on certain dates (e.g. an assembly)", set_dates),
     ("Make a new schedule", new_schedule),
     ("Change a schedule (its periods, times, colours or days)", change_schedule),
     ("Remove a schedule", remove_schedule),
     ("Go back to an earlier version of the schedules", go_back),
+    ("Show a message on the clock (instead of the joke)", show_message),
     ("Restart the clock, update it, or reboot pi-projector", restart_or_reboot),
+    ("Recent changes (who changed what, and when)", recent_changes),
     ("Projector Clock documentation", docs),
 ]
-SAVES = {set_dates, new_schedule, change_schedule, remove_schedule, go_back}
+# What each of these needs the clock on pi-projector to be able to do.
+NEEDS = {action: "localSchedules" for action in
+         (change_today, set_dates, new_schedule, change_schedule, remove_schedule, go_back)}
+NEEDS[show_message] = "clockMessage"
 
 
 def run(config: Config) -> None:
@@ -755,10 +905,11 @@ def _do(action, settings: ClockSettings) -> None:
             return
         with connection:
             pi = ClockPi(connection, settings)
-            if action in SAVES and not pi.can_use_saved():
+            if action in NEEDS and not pi.can(NEEDS[action]):
                 pi.check()
-                ui.warning("The clock on pi-projector needs updating before it can use "
-                           "schedules saved from here.")
+                ui.warning("The clock on pi-projector needs updating before it can "
+                           + ("use schedules saved from here." if NEEDS[action] ==
+                              "localSchedules" else "show messages."))
                 if not ui.confirm("Update it from GitHub now?", default=True):
                     return
                 _update(pi)
