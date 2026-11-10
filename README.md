@@ -14,25 +14,32 @@ Control the Timberline Hackerspace Raspberry Pis from a lab computer.
 
 There's nothing else to install: no Python, git, or packages.
 
-**Updates:** when a new version is out, the app offers to update itself when it starts. Say
-yes and it downloads the new version, swaps it in and restarts. (You can also run
+**Updates:** when a new version is out, the app offers to update itself when it starts,
+listing what's new in it. Say yes and it downloads the new version, swaps it in and restarts. (You can also run
 `control-panel --update` from a terminal.)
 
 ## Using it
 
-The main menu has four panels: **TV Art Shrines**, **Entrance Theme Machine**, **Projector
-Clock** and **Grade 9 Mode**. Each panel clears the screen and shows its heading, then a numbered menu: type a number
+The main menu has five items: **TV Art Shrines**, **Entrance Theme Machine**, **Projector
+Clock**, **Check the Pis** and **Grade 9 Mode**. Each panel clears the screen and shows its heading, then a numbered menu: type a number
 and press Enter, or `q` to go back (or quit, from the main menu). Questions end with
 `, or (q)uit:`, and show what Enter does if it does something, like
 `Type their grad year (Enter = 2027), or (q)uit:`. Yes-or-no questions are `(Y/n)` or `(y/N)`,
 the capital letter being what Enter means. Where you can pick several TVs, type their numbers,
-like `1 4` or `2-3` or `all`. When a task is done and has something to read, press Enter to go back to the panel (if its last step was a question, like *Add a new theme*'s `To add another, paste a link or drag an mp3 file into this window, or (q)uit:`, answering `q` goes straight back). In a menu that suggests an item, like the TV a shrine goes on, it shows `Choose an item (Enter = 2), or (q)uit:`.
+like `1 4` or `2-3` or `all`. When a task is done and has something to read, press Enter to go back to the panel (if its last step was a question, like *Add new themes*'s `To add more, paste a link or drag mp3 files into this window, or (q)uit:`, answering `q` goes straight back). In a menu that suggests an item, like the TV a shrine goes on, it shows `Choose an item (Enter = 2), or (q)uit:`.
 
 The first time you connect to a Pi you'll be asked for its password. If you're on your own
 Windows login (not a shared one), you can have Windows remember it in Credential Manager. The
 app also remembers each Pi's identity the first time it connects. If that ever changes, it warns
 you before sending the password, so another computer can't pretend to be a Pi to collect it.
 That's expected after a Pi is re-installed; you'll be asked whether to trust it.
+
+**Activity log:** each change (making, adding to, renaming, moving or removing a shrine, putting
+back or deleting backups, adding or removing themes, changing the clock's schedules or message)
+is noted in an `activity.log` on the Pi that was changed, with who did it (their Windows login),
+from which computer, and when. Each panel's **Recent changes** shows the latest, or the ones
+about a name (e.g. a student's username or a theme's code), so it's the same whichever
+computer you look from.
 
 ### TV Art Shrines
 
@@ -67,9 +74,12 @@ sound) is used as it is, under the same name; others are converted, and the app 
 | Rename a shrine (e.g. to a different username) | Type its new name. Its folder on pi-files is renamed, and its art and videos with it (`old.name.z.sun.jpg` becomes `new.name.z.sun.jpg`; files not named after it, like `notes.mp4`, keep their names), so nothing is made again. If it has a title card, you can make a new one with the new name. Then its old videos come off the TVs and the renamed ones go on. It stays on the same TV. |
 | Move a shrine to another TV | Its folder on pi-files moves to the TV you pick (Enter picks the one its name goes on, if it's on another), its videos come off its old TV and go on the new one. The hallway shows it either way. |
 | Remove a shrine | Takes it off the TVs, and either moves its art to `backup` (so it can be put back) or deletes it for good. |
+| Backups: put something back, or delete old ones | `backup` on pi-files has removed shrines, deleted or replaced art, and videos taken off TVs. **Put something back**: find it by name (newest first) and it goes back where it was (a piece into its shrine; if one with the same name is there now, it comes back as `name-restored`), then onto the TVs. Where each backup came from is noted when it's made; for backups from before v0.9 it's worked out from the name, and it asks which TV a shrine was on. **Delete old backups**: everything older than the months you choose (Enter = 6), after showing what and how much, to make room. |
+| Check the TVs (what's on them, compared with pi-files) | For each TV you pick: whether it has every video it should (and which are missing or out of date, or aren't on pi-files), and how much room is left on it. Also lists shrines whose videos haven't been made yet. Changes nothing: *Update the TVs from pi-files* does. |
 | Update the TVs from pi-files | Checks every shrine the chosen TVs show: tidies hightower's loose files, makes any videos pi-files is missing (e.g. for art copied there by hand, or from hightower), then makes the TVs match. Videos on a TV that aren't on pi-files are listed, and you choose: add them to pi-files (each to its student's shrine, so they stay), back them up to pi-files and take them off, or leave them. |
 | Turn TVs on or off | Some or all of them, at the same time (using the TV's HDMI-CEC remote control commands). |
 | Restart a TV's slideshow, or reboot it | Restarting the slideshow is quick and picks up new or deleted videos. |
+| Recent changes (who changed what, and when) | The latest changes to the shrines, from pi-files' `activity.log` (see above), or the ones about a name you type. |
 | TV Art Shrines documentation | A link to this page. |
 
 The first time videos are made, the app downloads **ffmpeg** (a free video tool, about 31 MB)
@@ -112,16 +122,27 @@ drive. It's worth backing up the drive now and then.
 
 | Menu item | What it does |
 | --- | --- |
-| Add a new theme | From a link to an mp3, or an mp3 file dragged into the window. Checks that it really is an mp3, suggests the code from the file name. If the code is taken, you can use another code or replace that theme. |
+| Add new themes (one or several) | From links to mp3s, or mp3 files dragged into the window: one or several at once, or a folder or `.zip` of them. For each, it checks that it really is an mp3, then: **Add it** (Enter), **Play it on this computer first**, **Use only part of it** (from where, and for how long; it fades in and out), or **Even out its loudness** (so it isn't much louder or quieter than other themes). Trimming and evening out use ffmpeg, downloaded the first time if need be (as for the TVs). Then it suggests the code from the file name; if the code is taken, you can use another code or replace that theme. |
 | Remove a theme | Type its code. Then either keep a backup on pi-themes (in `removed/` next to the themes, where the player can't play it), or delete it for good. |
 | Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. It runs its own copy of the player, so spam-block and admin (`*`) codes here don't affect the keypad. Leaving stops anything still playing. |
 | List and search themes | Shows every theme code on the Pi's USB drive, then type part of a code to see only the codes that contain it. |
 | Toggle mute | Mutes the speaker, or unmutes it if it's muted. |
 | Say something (text to speech) | Through the entrance speaker. |
 | Reboot pi-themes | Turns it off and on again. |
+| Recent changes (who added or removed which themes, and when) | From pi-themes' `activity.log`, in `/home/pi/themes`. |
 | pi-themes documentation | A link to the player, [timberline-secondary/themes](https://github.com/timberline-secondary/themes). |
 
 Nothing on pi-themes needs to change to use this app.
+
+### Check the Pis
+
+One screen with a line for each Pi (TVs 1-4, pi-files, pi-themes and pi-projector):
+- whether it can be reached, and how long it's been up;
+- how much room is left on the drive that matters (a TV's SD card, pi-files' SSD, pi-themes'
+  USB stick), and whether that drive is plugged in;
+- whether the thing it's for is running (a TV's slideshow, the keypad theme player, the clock).
+
+It changes nothing. A line in yellow or red needs a look.
 
 ### Grade 9 Mode
 
@@ -143,13 +164,16 @@ it shows the change (or, if you'd rather wait, it picks them up at midnight).
 
 | Menu item | What it does |
 | --- | --- |
+| Change today's schedule | Pick the schedule the clock shows today (e.g. the Short Day schedule): it's set for today's date and the clock restarts. If today already has a different one, you can go back to the usual one for the day of the week. |
 | See the schedules | Each schedule's days and dates, and its periods with their colours, then which one the clock shows today. |
 | Use a schedule on certain dates | E.g. the Flex schedule on a Friday, or an assembly or early dismissal schedule. On those dates the clock uses it instead of the usual one. Dates can be typed as `2026-10-30`, `10-30`, `today` or `tomorrow`. Dates that have gone by are tidied away. |
 | Make a new schedule | Starts as a copy of one you choose, then change it (as below). Give it days of the week, or none and use it on dates. |
 | Change a schedule | Change, add or remove periods (what it says, when it starts, its type and colour), and the schedule's name and days. A day of the week only has one schedule, so giving one a day takes it from any other. It's checked before saving, e.g. that the first period starts at 00:00. |
 | Remove a schedule | |
 | Go back to an earlier version of the schedules | Lists the copies kept each time they were saved, shows the one you pick, and puts it back. |
+| Show a message on the clock (instead of the joke) | Type a message, e.g. *Assembly in the gym at 10:30*, and until when (Enter = the end of today; or e.g. `15:30`, `tomorrow 9:00`, `11-12 15:30`, or `never` for until it's taken off). The clock shows it where the joke usually is, then goes back to jokes. If there's a message, you can change it or take it off. It's kept in `message.js` next to the clock. |
 | Restart the clock, update it, or reboot pi-projector | Restarting the clock makes it read its schedules again. Updating makes the clock the latest one on GitHub, then restarts it. If some of its files were changed on the Pi (and are different on GitHub), it lists them and asks first; the Pi's versions are kept in git (a `before-update-…` branch, or the stash). |
+| Recent changes (who changed what, and when) | From pi-projector's `activity.log`, in `/home/pi/jsclock`. |
 | Projector Clock documentation | A link to jsclock's README. |
 
 The first time schedules are saved, the clock may need updating to a version that reads
@@ -177,6 +201,7 @@ player_dir = "/home/pi/themes"      # where themes.py lives
 songs_dir = "/mnt/usb0"             # must match THEME_PATH in the player's .env
 python = "python"
 mixer_control = "Headphone"         # amixer control used to mute/unmute
+ffmpeg = ""                         # to trim themes; empty means the TVs' one (downloaded)
 
 [tvs]
 host_pattern = "pi-tv{n}.hackerspace.tbl"  # {n} is the TV's number, 1 to 4
@@ -221,6 +246,8 @@ uv run ruff check src tests   # lint
 | `src/control_panel/art.py` | pi-files: where the shrines' art, and the videos made from it, are kept. |
 | `src/control_panel/panels/grade9.py` | Grade 9 mode. |
 | `src/control_panel/panels/clock.py` | The Projector Clock panel. |
+| `src/control_panel/panels/status.py` | Check the Pis. |
+| `src/control_panel/activity.py` | The activity log kept on each Pi. |
 | `src/control_panel/shrine.py` | Making shrines: title cards (Pillow), pictures, slideshows, converting videos. |
 | `src/control_panel/ffmpeg.py` | Downloading ffmpeg (pinned, checksum checked) and running it. |
 | `src/control_panel/ssh.py` | Running commands and copying files on a Pi (paramiko). |
