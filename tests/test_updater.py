@@ -323,3 +323,24 @@ def test_new_version_wont_start_and_old_cant_be_put_back(github, exe, frozen_app
     github.release()
     assert app._offer_update() == 1  # stop, rather than run from a replaced exe
     assert "download it again" in frozen_app["messages"][-1]
+
+
+def test_whats_new_lists_the_changes_in_newer_releases(github, monkeypatch):
+    monkeypatch.setattr(updater, "RELEASES_API", f"{github.url}/releases")
+    notes = ("## What's Changed\n* Backups, Check the Pis, and more (v0.9.0) by @someone in "
+             "https://github.com/timberline-secondary/control-panel/pull/31\n\n"
+             "**Full Changelog**: https://github.com/timberline-secondary/control-panel/"
+             "compare/v0.8.7...v0.9.0")
+    github.routes["/releases"] = (200, json.dumps([
+        {"tag_name": "v0.9.0", "body": notes},
+        {"tag_name": "v0.8.8", "body": "* Fix a thing by @someone in https://x/pull/30"},
+        {"tag_name": "v0.8.7", "body": "* Already have it by @someone in https://x/pull/29"},
+        {"tag_name": "latest-draft", "body": None},
+    ]).encode(), {})
+    assert updater.whats_new("0.8.7") == [
+        ("v0.9.0", ["Backups, Check the Pis, and more"]), ("v0.8.8", ["Fix a thing"])]
+
+
+def test_whats_new_when_github_cant_be_reached(github, monkeypatch):
+    monkeypatch.setattr(updater, "RELEASES_API", f"{github.url}/nothing-here")
+    assert updater.whats_new("0.8.7") == []

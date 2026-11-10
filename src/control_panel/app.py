@@ -8,9 +8,9 @@ import traceback
 from pathlib import Path
 
 from control_panel import __version__, config, ui, updater
-from control_panel.panels import clock, grade9, themes, tvs
+from control_panel.panels import clock, grade9, status, themes, tvs
 
-PANELS = [tvs, themes, clock, grade9]
+PANELS = [tvs, themes, clock, status, grade9]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,7 +76,12 @@ def _offer_update() -> int | None:
     release = updater.latest_release()
     if release is None or not updater.is_newer(release):
         return None
-    if not ui.confirm(f"Version {release.tag} is out (you have v{__version__}). Update now?"):
+    ui.info(f"Version {release.tag} is out (you have v{__version__}).")
+    for tag, changes in updater.whats_new():
+        ui.info(f"What's new in {tag}:")
+        for change in changes:
+            ui.info(f"  - {change}")
+    if not ui.confirm("Update now?"):
         return None
     old = _install(release, exe)
     if old is None:
