@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import datetime
 import ipaddress
 import os
 import posixpath
@@ -30,13 +31,14 @@ from typing import BinaryIO
 import paramiko
 from PIL import Image
 
-from control_panel import ffmpeg, login, shrine, ui
+from control_panel import activity, ffmpeg, login, shrine, ui
 from control_panel.art import (
     BACKUP,
     MADE_NOTE,
     ArtError,
     ArtFolder,
     ArtServer,
+    Backup,
     is_picture,
     is_title_card,
     order,
@@ -667,17 +669,25 @@ def update_tvs(settings: TvsSettings, server: ArtServer, numbers: list[int]) -> 
             server.note_deleted(gone - shown)
     by_name = {art.name: art for tv in folders for art in shrines[tv]}
     for number in numbers:
-        wanted: dict[str, tuple[str, int]] = {}
-        for folder in art_tvs(number):
-            for file_name, source in playing[folder].items():
-                if file_name not in wanted:
-                    wanted[file_name] = source
-                elif wanted[file_name][1] != source[1]:
-                    ui.warning(f"TV {number}: {source[0]} has the same name as "
-                               f"{wanted[file_name][0]}, so it isn't shown.")
+        wanted = _wanted(playing, number)
         print()
         _on_tv(settings, number,
                lambda tv, wanted=wanted: _sync(tv, server, wanted, gone, by_name))
+
+
+def _wanted(playing: dict[int, dict[str, tuple[str, int]]],
+            number: int) -> dict[str, tuple[str, int]]:
+    """The videos a TV should show: {name: (path on pi-files, size)}, from playing, the
+    videos for each TV folder it shows."""
+    wanted: dict[str, tuple[str, int]] = {}
+    for folder in art_tvs(number):
+        for file_name, source in playing[folder].items():
+            if file_name not in wanted:
+                wanted[file_name] = source
+            elif wanted[file_name][1] != source[1]:
+                ui.warning(f"TV {number}: {source[0]} has the same name as "
+                           f"{wanted[file_name][0]}, so it isn't shown.")
+    return wanted
 
 
 def art_tvs(number: int) -> tuple[int, ...]:
@@ -725,6 +735,8 @@ def _sync(tv: TvPi, server: ArtServer, wanted: dict[str, tuple[str, int]],
         if what == "add":
             for file_name in unknown:
                 _add_to_pi_files(tv, server, file_name, shrines)
+            server.log(f"Added {len(unknown)} video(s) only {tv.name} had to pi-files: "
+                       f"{', '.join(unknown)}")
         if what != "backup":
             extra = [f for f in extra if f in gone]
     if not extra and not to_copy:
@@ -743,6 +755,10 @@ def _sync(tv: TvPi, server: ArtServer, wanted: dict[str, tuple[str, int]],
     for file_name in to_copy:
         _copy_to_tv(tv, server, file_name, *wanted[file_name])
     ui.success(f"{tv.name}: copied {len(to_copy)} and took off {len(extra)} video(s).")
+    backed_up = [f for f in extra if f not in gone]
+    if backed_up:
+        server.log(f"Took {len(backed_up)} video(s) that weren't on pi-files off {tv.name}, "
+                   f"kept in {BACKUP}: {', '.join(backed_up)}")
     refresh(tv)
 
 
@@ -994,6 +1010,8 @@ def make_shrine(settings: TvsSettings) -> None:
             with on_pi_files(server):
                 art = server.folder_for(name, tv)
                 _copy_to(server, art, files, set())
+                server.log(f"Made the shrine {art.folder} (TV {tv}), with {len(files)} "
+                           "piece(s) of art")
         update_shrine(settings, server, art)
 
 
@@ -1064,6 +1082,11 @@ def _add_to(settings: TvsSettings, server: ArtServer, art: ArtFolder,
                     raise
             if new:
                 _copy_to(server, art, new, set(existing))
+            if new or (same_name and replace):
+                replaced = len(same_name) if replace else 0
+                server.log(f"Added {len(new)} piece(s) of art to {art.folder} (TV {art.tv})"
+                           + (f", and replaced {replaced} (old ones kept in {BACKUP})"
+                              if replaced else ""))
     if new or (same_name and replace):
         update_shrine(settings, server, art)
 
@@ -1108,6 +1131,8 @@ def view_art(settings: TvsSettings) -> None:
                               default=False):
                     with on_pi_files(server):
                         server.set_aside(path, file_name)
+                        server.log(f"Deleted {file_name} from {art.folder} (TV {art.tv}), "
+                                   f"kept in {BACKUP}")
                     deleted.add(file_name)
                     ui.success(f"Deleted {file_name}.")
         finally:
@@ -1186,6 +1211,7 @@ def rename_shrine(settings: TvsSettings) -> None:
             new = server.rename(art, name, art.tv)
             ui.success(f"Renamed {art.path} to {new.path} on pi-files, and its art and "
                        "videos with it.")
+            server.log(f"Renamed the shrine {art.folder} to {new.folder} (TV {art.tv})")
             if new_card is not None:
                 for path in server.art_files(new):
                     if is_title_card(path):
@@ -1217,6 +1243,7 @@ def move_shrine(settings: TvsSettings) -> None:
             videos = set(server.videos(art))
             new = server.rename(art, art.name, tv)
             ui.success(f"Moved {art.path} to {new.path} on pi-files.")
+            server.log(f"Moved the shrine {art.folder} from TV {art.tv} to TV {tv}")
         # Its videos come off its old TV, and go on its new one (the hallway keeps them).
         update_shrine(settings, server, new, gone=videos, moved_from=art.tv)
 
@@ -1242,9 +1269,221 @@ def remove_shrine(settings: TvsSettings) -> None:
             if how == "delete":
                 server.delete(art.path)
                 ui.success(f"Deleted {art.path}.")
+                server.log(f"Removed the shrine {art.folder} (TV {art.tv}), deleted for good")
             else:
                 ui.success(f"Moved {art.path} to {server.set_aside(art.path, art.folder)}.")
+                server.log(f"Removed the shrine {art.folder} (TV {art.tv}), kept in {BACKUP}")
         update_shrine(settings, server, art, removed=True, gone=gone)
+
+
+def backups(settings: TvsSettings) -> None:
+    with art_server(settings) as server:
+        if server is None:
+            return
+        with on_pi_files(server):
+            items = server.backups()
+        if not items:
+            ui.info(f"pi-files' {BACKUP} folder is empty.")
+            return
+        ui.info(f"pi-files' {BACKUP} folder has {len(items)} thing(s) in it, "
+                f"{size_text(sum(b.size for b in items))} in all: removed shrines, deleted or "
+                "replaced art, and videos taken off TVs.")
+        what = ui.choose([("Put something back", "restore"),
+                          ("Delete old backups, to make room", "clean")],
+                         "What do you want to do?")
+        if what == "restore":
+            _put_back(settings, server, items)
+        elif what == "clean":
+            _clean_up(server, items)
+
+
+def describe_backup(backup: Backup) -> str:
+    when = f"{backup.when:%b %d, %Y %H:%M}" if backup.when else "(no date)"
+    label = backup.label
+    if backup.is_folder:
+        kind = "shrine"
+    elif found := re.fullmatch(r"tv(\d)-(.+)", label):
+        kind, label = f"video taken off TV {found[1]}:", found[2]
+    else:
+        kind = "piece"
+    return f"{when}  {kind} {label} ({size_text(backup.size)})"
+
+
+def _put_back(settings: TvsSettings, server: ArtServer, items: list[Backup]) -> None:
+    while True:
+        text = ui.ask("Type part of its name to find it (Enter = show the newest)")
+        if text is None:
+            return
+        found = [b for b in items if text.casefold() in b.name.casefold()]
+        if not found:
+            ui.info(f"Nothing in {BACKUP} has '{text}' in its name.")
+            continue
+        if len(found) > MAX_LISTED:
+            ui.info(f"Showing the newest {MAX_LISTED} of {len(found)}. Type more of the name "
+                    "to narrow it down.")
+        picked = ui.choose([(describe_backup(b), b) for b in found[:MAX_LISTED]]
+                           + [("Search again", "again")], "Which one should be put back?")
+        if picked is None:
+            return
+        if picked != "again":
+            break
+    with on_pi_files(server):
+        target = _restore_target(server, picked)
+    if target is None:
+        return
+    path, art = target
+    if not ui.confirm(f"Put it back as {path}?", default=True):
+        return
+    with on_pi_files(server):
+        server.restore(picked, path)
+        server.log(f"Put back {picked.label} from {BACKUP}, as {path}")
+    ui.success(f"Put it back: {path}")
+    if art is not None:
+        update_shrine(settings, server, art)
+    else:
+        ui.info("'Update the TVs from pi-files' puts it on the TVs.")
+
+
+def _restore_target(server: ArtServer, backup: Backup) -> tuple[str, ArtFolder | None] | None:
+    """Where to put a backup back, and the shrine it's then in (None if it isn't in one).
+    Asks when that can't be worked out (it wasn't noted for backups from before v0.9).
+    None if they go back, or the place is taken."""
+    if backup.is_folder:
+        path = backup.origin
+        if path is None:
+            tv = _ask_tv(backup.label)
+            if tv is None:
+                return None
+            path = posixpath.join(server.tv_path(tv), backup.label)
+        if server.connection.exists(path):
+            ui.error(f"There's already a shrine at {path}. Rename or remove it first.")
+            return None
+        return path, ArtFolder(_tv_of(server, path) or 1, path, posixpath.basename(path))
+    file_name = re.sub(r"^tv\d-", "", backup.label)
+    if backup.origin:
+        path = backup.origin
+    else:
+        owner = owner_of(file_name)
+        found = server.find(owner, exact=True) if owner else []
+        if found:
+            path = posixpath.join(found[0].path, file_name)
+        elif owner:
+            tv = _ask_tv(owner)
+            if tv is None:
+                return None
+            path = posixpath.join(server.tv_path(tv), owner, file_name)
+        else:
+            ui.info(f"{file_name} isn't named after anyone, so pick the shrine it goes in.")
+            art = _choose_shrine(server, can_list=True)
+            if art is None:
+                return None
+            path = posixpath.join(art.path, file_name)
+    stem, ext = posixpath.splitext(path)
+    n = 1
+    while server.connection.exists(path):  # e.g. a new piece with the same name since
+        n += 1
+        path = f"{stem}-restored{'' if n == 2 else f'-{n - 1}'}{ext}"
+    folder = posixpath.dirname(path)
+    tv = _tv_of(server, folder)
+    if tv is None or folder == server.tv_path(tv):
+        return path, None  # loose in a TV's folder
+    return path, ArtFolder(tv, folder, posixpath.basename(folder))
+
+
+def _tv_of(server: ArtServer, path: str) -> int | None:
+    """Which TV's folder a path on pi-files is in."""
+    first = posixpath.relpath(path, server.root).split("/")[0]
+    found = re.fullmatch(r"tv(\d)", first)
+    return int(found[1]) if found and int(found[1]) in TVS else None
+
+
+def _clean_up(server: ArtServer, items: list[Backup]) -> None:
+    dated = [b for b in items if b.when]
+    if dated:
+        ui.info(f"The oldest is from {min(b.when for b in dated):%B %d, %Y}.")
+    while True:
+        months = ui.ask("Delete the ones older than how many months?", default="6")
+        if months is None:
+            return
+        if months.isascii() and months.isdigit() and int(months) <= 120:
+            break
+        ui.error("Type a whole number of months, e.g. 6.")
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=30 * int(months))
+    old = [b for b in dated if b.when < cutoff]
+    if not old:
+        ui.info(f"Nothing in {BACKUP} is older than {months} month(s).")
+        return
+    ui.info(f"{len(old)} thing(s) older than {months} month(s), "
+            f"{size_text(sum(b.size for b in old))}:")
+    for backup in old[:10]:
+        ui.info(f"  {describe_backup(backup)}")
+    if len(old) > 10:
+        ui.info(f"  ...and {len(old) - 10} more")
+    if not ui.confirm("Delete them for good? This can't be undone.", default=False):
+        return
+    with on_pi_files(server), ui.progress(f"Deleting {len(old)} backup(s)") as update:
+        for i, backup in enumerate(old, start=1):
+            server.delete_backup(backup)
+            update(i / len(old))
+        server.log(f"Deleted {len(old)} backup(s) older than {months} month(s) from {BACKUP}, "
+                   f"{size_text(sum(b.size for b in old))}")
+    ui.success(f"Deleted them, making {size_text(sum(b.size for b in old))} of room.")
+
+
+def check_tvs(settings: TvsSettings) -> None:
+    """Compare what's on the TVs with what pi-files says they should show, changing
+    nothing."""
+    numbers = ui.choose_many([(label, number) for number, label in TVS.items()],
+                             "Which TVs should be checked?")
+    if not numbers:
+        return
+    with art_server(settings) as server:
+        if server is None:
+            return
+        folders = sorted({tv for n in numbers for tv in art_tvs(n)})
+        with on_pi_files(server):
+            shrines = {tv: server.shrines(tv) for tv in folders}
+            _say_unreadable(server)
+            playing = {tv: _videos_for(server, tv, shrines[tv]) for tv in folders}
+            not_made = [art for tv in folders for art in shrines[tv]
+                        if not server.videos(art) and server.art_files(art)]
+        for art in not_made:
+            ui.warning(f"{art.folder} (TV {art.tv}) has art, but its videos haven't been made "
+                       "yet.")
+        behind = bool(not_made)
+        for number in numbers:
+            wanted = _wanted(playing, number)
+            result: list[bool] = []
+            _on_tv(settings, number, lambda tv, wanted=wanted, result=result: result.append(
+                _report(tv, wanted)))
+            behind = behind or result != [True]
+    if behind:
+        ui.info("'Update the TVs from pi-files' brings them up to date.")
+
+
+def _report(tv: TvPi, wanted: dict[str, tuple[str, int]]) -> bool:
+    """Say how a TV compares with what it should show. True if it's up to date."""
+    playing = tv.videos()
+    missing = sorted(f for f in wanted if playing.get(f) != wanted[f][1])
+    extra = sorted(set(playing) - set(wanted))
+    free = tv.free_space()
+    room = f", {size_text(free)} free" if free is not None else ""
+    if not missing and not extra:
+        ui.success(f"{tv.name}: up to date ({len(wanted)} videos{room}).")
+        return True
+    ui.warning(f"{tv.name}: {len(playing)} videos{room}.")
+    for label, names in (("missing or out of date", missing), ("not on pi-files", extra)):
+        if names:
+            shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5
+                                            else "")
+            ui.info(f"  {len(names)} {label}: {shown}")
+    return False
+
+
+def recent_changes(settings: TvsSettings) -> None:
+    with art_server(settings) as server:
+        if server is not None:
+            activity.show(server.connection, server.log_path())
 
 
 def update(settings: TvsSettings) -> None:
@@ -1309,9 +1548,12 @@ ACTIONS = [
     ("Rename a shrine (e.g. to a different username)", rename_shrine),
     ("Move a shrine to another TV", move_shrine),
     ("Remove a shrine", remove_shrine),
+    ("Backups: put something back, or delete old ones", backups),
+    ("Check the TVs (what's on them, compared with pi-files)", check_tvs),
     ("Update the TVs from pi-files", update),
     ("Turn TVs on or off", power),
     ("Restart a TV's slideshow, or reboot it", restart),
+    ("Recent changes (who changed what, and when)", recent_changes),
     ("TV Art Shrines documentation", docs),
 ]
 

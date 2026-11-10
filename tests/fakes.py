@@ -55,8 +55,22 @@ class FakeFilesConnection:
         if command.startswith("rm -rf -- "):
             gone = shlex.split(command)[-1]
             self.dirs = {d for d in self.dirs if d != gone and not d.startswith(gone + "/")}
-            self.files = {f: data for f, data in self.files.items() if not f.startswith(gone + "/")}
+            self.files = {f: data for f, data in self.files.items()
+                          if f != gone and not f.startswith(gone + "/")}
             return CommandResult(0, "")
+        if command.startswith("printf '%s\\n' "):  # a line added to a log
+            text, _, path = shlex.split(command)[2:5]
+            self.files[path] = self.files.get(path, b"") + text.encode() + b"\n"
+            return CommandResult(0, "")
+        if command.startswith("tail -n "):
+            path = shlex.split(command)[3]
+            return CommandResult(0, self.files.get(path, b"").decode())
+        if " && du -s -B1 -- " in command:
+            folder = shlex.split(command)[1]
+            names = shlex.split(command.split(" -- ", 1)[1])
+            return CommandResult(0, "".join(
+                f"{sum(len(d) for p, d in self.files.items() if p.startswith(f'{folder}/{n}/'))}"
+                f"\t{n}\n" for n in names))
         if command.startswith("sha256sum -- "):
             lines = []
             for path in shlex.split(command)[2:]:
@@ -71,6 +85,10 @@ class FakeFilesConnection:
 
     def exists(self, path):
         return path in self.dirs or path in self.files
+
+    def backup_files(self):
+        """The files in pi-files' backup folder (not the app's own notes there)."""
+        return [f for f in self.list_folder("/mnt/ssd/backup")[1] if not f.startswith(".")]
 
     def list_folder(self, path):
         if path not in self.dirs:
