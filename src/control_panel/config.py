@@ -43,6 +43,7 @@ class ThemesSettings(PiSettings):
     songs_dir: str = "/mnt/usb0"  # must match THEME_PATH in the player's .env
     python: str = "python"
     mixer_control: str = "Headphone"  # amixer control used to mute/unmute
+    ffmpeg: str = ""  # to trim new themes; empty means use (or download) the TVs' one
 
 
 @dataclass(frozen=True)

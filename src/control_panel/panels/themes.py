@@ -14,16 +14,18 @@ import io
 import posixpath
 import re
 import shlex
+import tempfile
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import paramiko
 
-from control_panel import __version__, login, ui
+from control_panel import __version__, activity, ffmpeg, login, ui
 from control_panel.config import Config, ThemesSettings
 from control_panel.ssh import CommandResult, ConnectionFailed, PiConnection
 
@@ -240,6 +242,13 @@ class ThemesPi:
         self.connection = connection
         self.settings = settings
 
+    def log_path(self) -> str:
+        return posixpath.join(self.settings.player_dir, activity.LOG_NAME)
+
+    def log(self, text: str) -> None:
+        """Note a change in pi-themes' activity log."""
+        activity.record(self.connection, self.log_path(), text)
+
     def theme_path(self, code: str) -> str:
         return posixpath.join(self.settings.songs_dir, f"{code}.mp3")
 
@@ -390,48 +399,225 @@ def speak(pi: ThemesPi) -> None:
 
 
 def add_theme(pi: ThemesPi) -> None:
-    ui.info("Add a theme from a link to an mp3, or from an mp3 file on this computer.")
-    prompt = "Paste a link, or drag an mp3 file into this window"
-    while True:
-        source = ui.ask(prompt)
-        if source is None:
-            return
-        if not source:
-            continue
+    ui.info("Add themes from links to mp3s, or mp3 files on this computer: drag in one or "
+            "several, or a folder or .zip of them.")
+    prompt = "Paste a link, or drag mp3 files into this window"
+    tools = _Tools(pi.settings)
+    with tempfile.TemporaryDirectory(prefix="themes-", ignore_cleanup_errors=True) as work:
+        while True:
+            text = ui.ask(prompt)
+            if text is None:
+                return
+            if not text:
+                continue
+            songs = gather_mp3s(text)
+            for number, (name, data) in enumerate(songs, start=1):
+                if len(songs) > 1:
+                    ui.info(f"\n{number} of {len(songs)}: {name}")
+                if not _add_one(pi, name, data, tools, Path(work)):
+                    return
+            prompt = "To add more, paste a link or drag mp3 files into this window"
+
+
+class _Tools:
+    """ffmpeg (to measure and edit mp3s), found or downloaded when it's first needed, and the
+    way to open a file on this computer."""
+
+    def __init__(self, settings: ThemesSettings):
+        from control_panel.panels import tvs  # (tvs uses this module, so not at the top)
+
+        self._get = tvs.Ffmpeg(tvs.TvsSettings(ffmpeg=settings.ffmpeg))
+        self._found = ffmpeg.find(settings.ffmpeg)
+        self.open_file = tvs.open_file
+
+    def ffmpeg(self) -> Path:
+        self._found = self._get()
+        return self._found
+
+    def length(self, path: Path) -> float | None:
+        """How long an mp3 is, without downloading ffmpeg just to say."""
+        return ffmpeg.audio_seconds(self._found, path) if self._found else None
+
+
+def gather_mp3s(text: str) -> list[tuple[str, bytes]]:
+    """The mp3s in what was typed or dragged in: links, files, folders and .zip files, one or
+    several. Each one that can't be used is said, and left out."""
+    from control_panel.panels.tvs import split_sources
+
+    songs = []
+    for source in split_sources(text):
         try:
-            name, data = read_mp3(clean_source(source))
+            path = Path(source).expanduser()
+            is_link = source.lower().startswith(("http://", "https://"))
+            if not is_link and path.is_dir():
+                found = sorted(p for p in path.rglob("*") if p.is_file()
+                               and p.suffix.lower() == ".mp3" and not p.name.startswith("."))
+                if not found:
+                    ui.error(f"There are no mp3 files in {path.name}.")
+                for mp3 in found:
+                    try:
+                        songs.append(read_mp3(str(mp3)))
+                    except ThemeError as e:
+                        ui.error(str(e))
+            elif (urllib.parse.urlparse(source).path if is_link else source).lower() \
+                    .endswith(".zip"):
+                songs += _mp3s_in_zip(source, is_link)
+            else:
+                songs.append(read_mp3(source))
         except ThemeError as e:
             ui.error(str(e))
-            continue
-        ui.success(f"Got {name} ({len(data) / 1_000_000:.1f} MB) - it's an mp3.")
+    return songs
 
-        suggestion = suggest_code(name)
-        while True:
-            code = _ask_code(suggestion)
-            if code is None:
-                return
-            if not pi.has_theme(code):
-                break
-            choice = ui.choose([
-                ui.choice("Use a different code", "different"),
-                ui.choice("Replace it", "replace"),
-            ], f"There's already a theme with code {code}.")
-            if choice is None:
-                return
-            if choice == "replace":
-                break
-            suggestion = None
 
+def _mp3s_in_zip(source: str, is_link: bool) -> list[tuple[str, bytes]]:
+    if is_link:
+        data = _download(source)[0]
+    else:
         try:
-            pi.add_theme(code, data)
+            data = Path(source).expanduser().read_bytes()
         except OSError as e:
-            ui.error(f"Couldn't save it on pi-themes: {e}")
-            return
-        if _is_number(code):
-            ui.success(f"Added! Type {code} on the entrance keypad to play it.")
-        else:
-            ui.success(f"Added! Play it by typing {code} in 'Play a theme'.")
-        prompt = "To add another, paste a link or drag an mp3 file into this window"
+            raise ThemeError(f"Couldn't read {source}: {e.strerror or e}") from e
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise ThemeError(f"{posixpath.basename(source)} isn't a .zip file.") from e
+    songs = []
+    with archive:
+        for info in archive.infolist():
+            name = posixpath.basename(info.filename)
+            if info.is_dir() or not name.lower().endswith(".mp3") or name.startswith(".") \
+                    or "__MACOSX" in info.filename:
+                continue
+            if info.file_size > MAX_MP3_BYTES:
+                ui.error(f"{name} is too big for a theme (over 50 MB).")
+                continue
+            song = archive.read(info)
+            if looks_like_mp3(song):
+                songs.append((name, song))
+            else:
+                ui.error(f"{name} (in the .zip) isn't an mp3 file.")
+    if not songs:
+        ui.error(f"There are no mp3 files in {posixpath.basename(source)}.")
+    return songs
+
+
+def clock_text(seconds: float) -> str:
+    """75.4 -> '1:15'."""
+    whole = round(seconds)
+    return f"{whole // 3600}:{whole // 60 % 60:02d}:{whole % 60:02d}" if whole >= 3600 else \
+        f"{whole // 60}:{whole % 60:02d}"
+
+
+def parse_seconds(text: str) -> float | None:
+    """'30', '0:30', '1:02.5' or '1:00:00' -> seconds. None if it isn't a time."""
+    parts = text.strip().split(":")
+    if not 1 <= len(parts) <= 3 or not all(re.fullmatch(r"\d+(\.\d+)?", p) for p in parts):
+        return None
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + float(part)
+    return seconds
+
+
+def _add_one(pi: ThemesPi, name: str, data: bytes, tools: _Tools, work: Path) -> bool:
+    """Ask about one mp3 (and maybe trim it, or even out its loudness), then add it. False if
+    they want to stop adding themes."""
+    edits = []
+    source = work / f"song-{len(list(work.iterdir())) + 1}.mp3"
+    source.write_bytes(data)
+    seconds = tools.length(source)
+    ui.success(f"Got {name} ({len(data) / 1_000_000:.1f} MB"
+               f"{f', {clock_text(seconds)} long' if seconds else ''}) - it's an mp3.")
+    while True:
+        what = ui.choose([
+            ("Add it", "add"),
+            ("Play it on this computer first", "play"),
+            ("Use only part of it" + (f" (it's {clock_text(seconds)} long)" if seconds else ""),
+             "trim"),
+            ("Even out its loudness (so it isn't much louder or quieter than other themes)",
+             "level"),
+        ], f"{name}:", default="add")
+        if what is None:
+            return False
+        if what == "add":
+            break
+        if what == "play":
+            tools.open_file(source)
+            continue
+        edited = work / f"song-{len(list(work.iterdir())) + 1}.mp3"
+        try:
+            if what == "trim":
+                part = _ask_part(seconds)
+                if part is None:
+                    continue
+                start, length = part
+                with ui.progress("Trimming it"):
+                    ffmpeg.edit_mp3(tools.ffmpeg(), source, edited, start=start, seconds=length)
+                edits.append(f"from {clock_text(start)}"
+                             + (f" for {clock_text(length)}" if length else ""))
+            else:
+                with ui.progress("Evening out its loudness"):
+                    ffmpeg.edit_mp3(tools.ffmpeg(), source, edited, level=True)
+                edits.append("loudness evened out")
+        except ffmpeg.FfmpegError as e:
+            ui.error(f"That didn't work: {e}")
+            continue
+        source, data = edited, edited.read_bytes()
+        seconds = tools.length(source)
+        ui.success(f"Done{f': it is {clock_text(seconds)} long now' if seconds else ''}. "
+                   "(Play it to check.)")
+    suggestion = suggest_code(name)
+    while True:
+        code = _ask_code(suggestion)
+        if code is None:
+            return False
+        if not pi.has_theme(code):
+            break
+        choice = ui.choose([
+            ui.choice("Use a different code", "different"),
+            ui.choice("Replace it", "replace"),
+        ], f"There's already a theme with code {code}.")
+        if choice is None:
+            return False
+        if choice == "replace":
+            break
+        suggestion = None
+    try:
+        replacing = pi.has_theme(code)
+        pi.add_theme(code, data)
+    except OSError as e:
+        ui.error(f"Couldn't save it on pi-themes: {e}")
+        return False
+    pi.log(f"{'Replaced' if replacing else 'Added'} theme {code} ({name}"
+           + (f", {', '.join(edits)}" if edits else "") + ")")
+    if _is_number(code):
+        ui.success(f"Added! Type {code} on the entrance keypad to play it.")
+    else:
+        ui.success(f"Added! Play it by typing {code} in 'Play a theme'.")
+    return True
+
+
+def _ask_part(seconds: float | None) -> tuple[float, float | None] | None:
+    """Which part of a song to use: (where it starts, how long, or None for to the end)."""
+    while True:
+        text = ui.ask("Start from where? e.g. 0:30", default="0:00")
+        if text is None:
+            return None
+        start = parse_seconds(text)
+        if start is not None and (seconds is None or start < seconds):
+            break
+        ui.error("Type a time in the song, like 0:30 or 1:05." if start is None else
+                 f"It's only {clock_text(seconds)} long.")
+    while True:
+        text = ui.ask("How many seconds should it play? e.g. 15 (Enter = to the end)")
+        if text is None:
+            return None
+        if not text:
+            return start, None
+        length = parse_seconds(text)
+        if length:
+            return start, length
+        ui.error("Type how long, like 15 or 0:20.")
 
 
 def remove_theme(pi: ThemesPi) -> None:
@@ -461,13 +647,19 @@ def remove_theme(pi: ThemesPi) -> None:
         return
     if backup:
         ui.success(f"Removed theme {code}. Its backup is {backup}.")
+        pi.log(f"Removed theme {code}, kept as {backup}")
     else:
         ui.success(f"Deleted theme {code}.")
+        pi.log(f"Deleted theme {code} for good")
+
+
+def recent_changes(pi: ThemesPi) -> None:
+    activity.show(pi.connection, pi.log_path())
 
 
 def _ask_code(suggestion: str | None) -> str | None:
     while True:
-        code = ui.ask("What code should play it?", default=suggestion or "")
+        code = ui.ask("Type the keypad code that should play it", default=suggestion or "")
         if code is None:
             return None
         code = code or suggestion or ""
@@ -532,13 +724,14 @@ def docs() -> None:
 
 
 ACTIONS = [
-    ("Add a new theme", add_theme),
+    ("Add new themes (one or several)", add_theme),
     ("Remove a theme", remove_theme),
     ("Play a theme", play),
     ("List and search themes", list_themes),
     ("Toggle mute", toggle_mute),
     ("Say something (text to speech)", speak),
     ("Reboot pi-themes", reboot),
+    ("Recent changes (who added or removed which themes, and when)", recent_changes),
     ("pi-themes documentation", docs),
 ]
 

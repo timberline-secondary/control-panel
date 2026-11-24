@@ -29,6 +29,8 @@ RELEASES_PAGE = "https://github.com/timberline-secondary/control-panel/releases/
 LATEST_RELEASE_API = (
     "https://api.github.com/repos/timberline-secondary/control-panel/releases/latest"
 )
+RELEASES_API = (
+    "https://api.github.com/repos/timberline-secondary/control-panel/releases?per_page=30")
 URL_ENV_VAR = "CONTROL_PANEL_UPDATE_URL"  # to test against a local server instead of GitHub
 ASSET_NAME = "control-panel.exe"
 ERROR_SHARING_VIOLATION = 32  # Windows: the file is open somewhere that doesn't allow this
@@ -85,6 +87,37 @@ def latest_release(timeout: float = 3) -> Release | None:
             http.client.HTTPException):
         return None
     return release if release.version else None
+
+
+def whats_new(current: str = __version__, timeout: float = 3) -> list[tuple[str, list[str]]]:
+    """For each release newer than this one, newest first: (its tag, what changed in it),
+    from its release notes. Empty if they can't be had."""
+    request = urllib.request.Request(RELEASES_API, headers={
+        **_HEADERS, "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            releases = json.load(response)
+        current_version = parse_version(current)
+        found = []
+        for release in releases:
+            version = parse_version(release.get("tag_name", ""))
+            if version and current_version and version > current_version:
+                found.append((release["tag_name"], changes(release.get("body") or "")))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError,
+            http.client.HTTPException):
+        return []
+    return sorted(found, key=lambda r: parse_version(r[0]), reverse=True)[:10]
+
+
+def changes(notes: str) -> list[str]:
+    """The changes listed in GitHub's release notes: '* Title (v1.2.3) by @who in https://...'
+    -> 'Title'."""
+    found = []
+    for line in notes.splitlines():
+        if line.startswith(("* ", "- ")):
+            line = re.sub(r" by @\S+ in https://\S+$", "", line[2:].strip())
+            found.append(re.sub(r" \(v\d+\.\d+\.\d+\)$", "", line))
+    return found
 
 
 def is_newer(release: Release, current: str = __version__) -> bool:

@@ -408,8 +408,95 @@ def test_restarting_closes_chromium_or_firefox(pi, monkeypatch):
 
 def test_the_menu():
     assert [title for title, _ in clock.ACTIONS] == [
-        "See the schedules", "Use a schedule on certain dates (e.g. an assembly)",
+        "Change today's schedule", "See the schedules",
+        "Use a schedule on certain dates (e.g. an assembly)",
         "Make a new schedule", "Change a schedule (its periods, times, colours or days)",
         "Remove a schedule", "Go back to an earlier version of the schedules",
+        "Show a message on the clock (instead of the joke)",
         "Restart the clock, update it, or reboot pi-projector",
-        "Projector Clock documentation"]
+        "Recent changes (who changed what, and when)", "Projector Clock documentation"]
+
+
+def log(pi):
+    return pi.connection.files.get("/home/pi/jsclock/activity.log", b"").decode()
+
+
+def test_change_todays_schedule_then_go_back_to_the_usual_one(pi, monkeypatch):
+    screen = Screen(monkeypatch, chooses=[named("Flex")])
+    clock.change_today(pi)
+    assert "the clock shows 4-Block, the usual one for Thursdays." in screen.text("info")
+    flex_saved = next(s for s in saved(pi) if s["description"] == "Flex")
+    assert flex_saved["dates"] == ["2026-10-22"]
+    assert len(restarts(pi)) == 1  # without asking
+    assert "Today (2026-10-22): the clock shows Flex" in log(pi)
+
+    offered = []
+
+    def go_back(choices):
+        offered.extend(title for title, _ in choices)
+        return named("Go back to the usual")(choices)
+
+    screen = Screen(monkeypatch, chooses=[go_back])
+    clock.change_today(pi)
+    assert "the clock shows Flex, instead of the usual 4-Block." in screen.text("info")
+    assert not any(title.startswith("4-Block (") for title in offered)  # only as "Go back"
+    assert all("2026-10-22" not in s.get("dates", []) for s in saved(pi))
+    assert clock.for_date(saved(pi), THURSDAY)["description"] == "4-Block"
+    assert "the clock shows 4-Block (back to the usual)" in log(pi)
+
+
+def test_show_a_message_then_take_it_off(pi, monkeypatch):
+    Screen(monkeypatch, asks=["Assembly <in the gym>", "tomorrow 9:00"])
+    clock.show_message(pi)
+    message = pi.message()
+    tomorrow = clock.datetime.date.today() + clock.datetime.timedelta(days=1)
+    assert message == {"text": "Assembly <in the gym>", "until": f"{tomorrow}T09:00"}
+    assert "const clockMessage = " in pi.connection.files["/home/pi/jsclock/message.js"].decode()
+    assert len(restarts(pi)) == 1
+    assert "Put a message on the clock: Assembly <in the gym>" in log(pi)
+
+    screen = Screen(monkeypatch, chooses=["clear"])
+    clock.show_message(pi)
+    assert "The clock shows: Assembly <in the gym> (until" in screen.text("info")
+    assert pi.message() is None and len(restarts(pi)) == 2
+    assert "Took the message off the clock" in log(pi)
+
+
+@pytest.mark.parametrize("answers, expected", [
+    ([""], "end of today"), (["never"], "never"), (["9:00 tomorrow", "tomorrow 9:00"], "9:00"),
+    (["0:00"], "asked again"),  # gone by already
+])
+def test_until_when(monkeypatch, answers, expected):
+    screen = Screen(monkeypatch, asks=answers)
+    try:
+        until = clock._ask_until()
+    except StopIteration:
+        until = "asked again"
+    if expected == "end of today":
+        assert (until.hour, until.minute) == (23, 59)
+    elif expected == "9:00":
+        assert (until.hour, until.minute) == (9, 0)
+        assert until.date() == clock.datetime.date.today() + clock.datetime.timedelta(days=1)
+    else:
+        assert until == expected
+    if expected == "asked again":
+        assert "That's already gone by." in screen.text("error")
+
+
+def test_saving_notes_the_change_in_the_log(pi, monkeypatch):
+    Screen(monkeypatch, chooses=[named("Weekend")], confirms=[True, False])
+    clock.remove_schedule(pi)
+    assert "Removed the schedule Weekend" in log(pi)
+    screen = Screen(monkeypatch, asks=["Weekend"])
+    clock.recent_changes(pi)
+    assert "Removed the schedule Weekend" in screen.text("info")
+
+
+def test_an_old_clock_is_updated_before_it_can_show_messages(pi, monkeypatch):
+    pi.connection.files["/home/pi/jsclock/clock_script.js"] = b"... localSchedules ..."
+    monkeypatch.setattr(clock.login, "connect", lambda settings: pi.connection)
+    monkeypatch.setattr(clock, "ClockPi", lambda connection, settings: pi)
+    screen = Screen(monkeypatch, confirms=[False])
+    clock._do(clock.show_message, ClockSettings())
+    screen.finished()
+    assert "needs updating before it can show messages" in screen.text("warning")

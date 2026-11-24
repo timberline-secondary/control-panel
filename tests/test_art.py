@@ -154,7 +154,7 @@ def test_tidy_puts_hightowers_loose_files_where_they_go():
     assert connection.files["/mnt/ssd/tv1/ann.lee/ann.lee.z.clip.mp4"] == b"clip"
     assert connection.files["/mnt/ssd/tv1/bo.ng/bo.ng.z.dance.mov"] == b"dance"
     assert "/mnt/ssd/tv1/0_RubeGoldberg-Webb.mp4" in connection.files
-    backup = connection.list_folder("/mnt/ssd/backup")[1]
+    backup = connection.backup_files()
     assert [f.endswith("-tv1-ann.lee.a.mp4") for f in backup] == [True]
     assert not any("organize_images" in s or "RubeGoldberg" in s for s in said)  # quietly
     assert any("odd.mov isn't in a shrine's folder" in s for s in said)

@@ -1,6 +1,7 @@
 import queue
 import socket
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -382,6 +383,7 @@ def add_screen(monkeypatch, tmp_path):
     messages = []
     for kind in ["success", "info", "warning", "error"]:
         monkeypatch.setattr(themes.ui, kind, lambda text, kind=kind: messages.append(text))
+    monkeypatch.setattr(themes.ffmpeg, "find", lambda configured="": None)  # not needed
 
     prompts = []
 
@@ -396,37 +398,91 @@ def add_screen(monkeypatch, tmp_path):
             assert next(left, "done") == "done"
 
     run.prompts = prompts
+    run.pi = pi
     return run, str(song), connection.files, messages
 
 
 def test_add_theme_using_the_suggested_code(add_screen):
     run, song, files, messages = add_screen
-    run(asks=[song, "", None], chooses=["replace"])  # Enter takes 0027, then q
+    run(asks=[song, "", None], chooses=["add", "replace"])  # Enter takes 0027, then q
     assert files["/mnt/usb0/0027.mp3"] == ID3_MP3
 
 
 def test_after_adding_a_theme_it_asks_for_the_next_one(add_screen):
     run, song, files, messages = add_screen
-    run(asks=[song, "0042", song, "0043", None])  # no "Add another?" in between
+    run(asks=[song, "0042", song, "0043", None], chooses=["add", "add"])
     assert files["/mnt/usb0/0042.mp3"] == files["/mnt/usb0/0043.mp3"] == ID3_MP3
-    links = [p for p in run.prompts if "mp3 file into this window" in p]
-    assert links == ["Paste a link, or drag an mp3 file into this window",
-                     "To add another, paste a link or drag an mp3 file into this window",
-                     "To add another, paste a link or drag an mp3 file into this window"]
+    links = [p for p in run.prompts if "into this window" in p]
+    assert links == ["Paste a link, or drag mp3 files into this window",
+                     "To add more, paste a link or drag mp3 files into this window",
+                     "To add more, paste a link or drag mp3 files into this window"]
 
 
 def test_add_theme_with_a_different_code_after_a_clash(add_screen):
     run, song, files, messages = add_screen
-    run(asks=[song, "", "0042", None], chooses=["different"])
+    run(asks=[song, "", "0042", None], chooses=["add", "different"])
     assert files["/mnt/usb0/0042.mp3"] == ID3_MP3
     assert files["/mnt/usb0/0027.mp3"] == b""  # untouched
 
 
+def test_add_several_themes_at_once(add_screen, tmp_path):
+    run, song, files, messages = add_screen
+    folder = tmp_path / "themes"
+    folder.mkdir()
+    (folder / "1111.mp3").write_bytes(ID3_MP3)
+    (folder / "notes.txt").write_text("not a song")
+    with zipfile.ZipFile(tmp_path / "more.zip", "w") as archive:
+        archive.writestr("songs/2222.mp3", ID3_MP3)
+        archive.writestr("songs/cover.jpg", b"jpg")
+        archive.writestr("__MACOSX/songs/._2222.mp3", b"junk")
+    run(asks=[f'"{folder}" "{tmp_path / "more.zip"}"', "", "", None], chooses=["add", "add"])
+    assert files["/mnt/usb0/1111.mp3"] == files["/mnt/usb0/2222.mp3"] == ID3_MP3
+    assert "1 of 2: 1111.mp3" in "".join(messages) and "2 of 2: 2222.mp3" in "".join(messages)
+
+
+def test_play_a_theme_here_before_adding_it(add_screen, monkeypatch):
+    run, song, files, messages = add_screen
+    played = []
+    monkeypatch.setattr(themes._Tools, "__init__", lambda self, settings: setattr(
+        self, "open_file", lambda path: played.append(path.read_bytes())) or setattr(
+        self, "_found", None))
+    run(asks=[song, "0042", None], chooses=["play", "add"])
+    assert played == [ID3_MP3]
+    assert files["/mnt/usb0/0042.mp3"] == ID3_MP3
+
+
+def test_trim_a_theme_and_even_out_its_loudness(add_screen, monkeypatch, tmp_path, ffmpeg_path):
+    run, song, files, messages = add_screen
+    monkeypatch.setattr(themes.ffmpeg, "find", lambda configured="": ffmpeg_path)
+    long_song = tmp_path / "a song.mp3"
+    themes.ffmpeg.run(ffmpeg_path, ["-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+                                    "-af", "volume=0.05", "-c:a", "libmp3lame", str(long_song)])
+    run(asks=[str(long_song), "0:02", "3", "0042", None], chooses=["trim", "level", "add"])
+    saved = tmp_path / "saved.mp3"
+    saved.write_bytes(files["/mnt/usb0/0042.mp3"])
+    assert 2.8 < themes.ffmpeg.audio_seconds(ffmpeg_path, saved) < 3.3
+    assert any("0:10 long" in m for m in messages)
+    assert any("it is 0:03 long now" in m for m in messages)
+    assert run.pi.connection.commands[-1][0].startswith("printf ")  # noted in the log
+    assert "Added theme 0042 (a song.mp3, from 0:02 for 0:03, loudness evened out)" in \
+        run.pi.connection.commands[-1][0]
+
+
+@pytest.mark.parametrize("text, seconds", [
+    ("30", 30), ("0:30", 30), ("1:02.5", 62.5), ("1:00:00", 3600), ("", None), ("1:x", None),
+])
+def test_parse_seconds(text, seconds):
+    assert themes.parse_seconds(text) == seconds
+    if seconds:
+        assert themes.parse_seconds(themes.clock_text(seconds)) == round(seconds)
+
+
 @pytest.mark.parametrize("asks, chooses", [
     ([None], []),  # q (or Ctrl+C) at the link prompt
-    (["SONG", None], []),  # q at the code prompt
-    (["SONG", ""], [None]),  # Cancel (or Ctrl+C) when the code is taken
-    (["SONG", "", None], ["different"]),  # q when asked for a different code
+    (["SONG"], [None]),  # q at "Add it"
+    (["SONG", None], ["add"]),  # q at the code prompt
+    (["SONG", ""], ["add", None]),  # Cancel (or Ctrl+C) when the code is taken
+    (["SONG", "", None], ["add", "different"]),  # q when asked for a different code
 ])
 def test_add_theme_can_always_be_left(add_screen, asks, chooses):
     run, song, files, messages = add_screen
@@ -501,8 +557,9 @@ def test_toggle_mute(monkeypatch, level, expected):
 
 def test_the_menu_is_in_the_asked_for_order():
     assert [title for title, _ in themes.ACTIONS] == [
-        "Add a new theme", "Remove a theme", "Play a theme", "List and search themes",
-        "Toggle mute", "Say something (text to speech)", "Reboot pi-themes",
+        "Add new themes (one or several)", "Remove a theme", "Play a theme",
+        "List and search themes", "Toggle mute", "Say something (text to speech)",
+        "Reboot pi-themes", "Recent changes (who added or removed which themes, and when)",
         "pi-themes documentation"]
 
 

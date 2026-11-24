@@ -212,6 +212,40 @@ def probe(ffmpeg: Path, path: Path) -> Probe:
                  bool(re.search(r"Stream #.*: Audio: ", result.stderr)))
 
 
+def audio_seconds(ffmpeg: Path, path: Path) -> float | None:
+    """How long an mp3 is, in seconds, if ffmpeg can tell."""
+    try:
+        result = subprocess.run(
+            [str(ffmpeg), "-hide_banner", "-nostdin", "-format_whitelist", "mp3", "-i", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _DURATION.search(result.stderr)
+    return int(match[1]) * 3600 + int(match[2]) * 60 + float(match[3]) if match else None
+
+
+def edit_mp3(ffmpeg: Path, source: Path, output: Path, *, start: float = 0,
+             seconds: float | None = None, level: bool = False) -> None:
+    """Make an mp3 from part of another (from start, for seconds, fading in and out so it
+    doesn't start or stop suddenly), and/or with its loudness evened out to the usual
+    level for speech and music (EBU R128, -14 LUFS)."""
+    filters = []
+    if start > 0:
+        filters.append("afade=t=in:d=0.3")
+    if seconds:
+        filters.append(f"afade=t=out:st={max(0.0, seconds - 1):.2f}:d={min(1.0, seconds):.2f}")
+    if level:
+        filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+    run(ffmpeg, [*(["-ss", f"{start:.2f}"] if start > 0 else []),
+                 "-format_whitelist", "mp3", "-i", str(source),
+                 *(["-t", f"{seconds:.2f}"] if seconds else []),
+                 *(["-af", ",".join(filters)] if filters else []),
+                 "-map", "0:a:0", "-c:a", "libmp3lame", "-q:a", "2", "-ar", "44100",
+                 "-id3v2_version", "3", str(output)])
+
+
 def run(ffmpeg: Path, args: list[str], *, seconds: float | None = None,
         progress: Callable[[float], None] | None = None) -> None:
     """Run ffmpeg with these arguments and wait for it.
