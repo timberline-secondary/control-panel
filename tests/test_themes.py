@@ -1,4 +1,5 @@
 import queue
+import shlex
 import socket
 import threading
 import zipfile
@@ -253,6 +254,9 @@ class FakeConnection:
 
     def run(self, command, *, sudo=False, timeout=60):
         self.commands.append((command, sudo))
+        if command.startswith("cp -- ") and self.result.ok:  # as the Pi would
+            _, _, source, target = shlex.split(command)
+            self.files[target] = self.files[source]
         return self.result
 
     def listdir(self, path):
@@ -622,10 +626,105 @@ def test_toggle_mute(monkeypatch, level, expected):
 
 def test_the_menu_is_in_the_asked_for_order():
     assert [title for title, _ in themes.ACTIONS] == [
-        "Add new themes (one or several)", "Remove a theme", "Play a theme",
+        "Add new themes (one or several)",
+        "Copy a theme to another code (so both codes play it)",
+        "Change a theme's code (rename it)", "Remove a theme", "Play a theme",
         "List and search themes", "Toggle mute", "Say something (text to speech)",
-        "Reboot pi-themes", "Recent changes (who added or removed which themes, and when)",
+        "Reboot pi-themes",
+        "Recent changes (who added, changed or removed which themes, and when)",
         "pi-themes documentation"]
+
+
+@pytest.fixture
+def theme_screen(monkeypatch):
+    """Runs a theme menu item with scripted answers. Returns (run, files, messages, log)."""
+    pi, connection = make_pi(files=["0042.mp3"])
+    connection.files["/mnt/usb0/0027.mp3"] = ID3_MP3
+    messages = []
+    for kind in ["success", "info", "warning", "error"]:
+        monkeypatch.setattr(themes.ui, kind, lambda text, kind=kind: messages.append(text))
+
+    def run(action, asks, chooses=(), confirms=()):
+        asks, chooses, confirms = iter(asks), iter(chooses), iter(confirms)
+        monkeypatch.setattr(themes.ui, "ask", lambda prompt, **k: next(asks))
+        monkeypatch.setattr(themes.ui, "choose", lambda *a, **k: next(chooses))
+        monkeypatch.setattr(themes.ui, "confirm", lambda prompt, **k: next(confirms))
+        action(pi)
+        for left in (asks, chooses, confirms):  # every scripted answer was asked for
+            assert next(left, "done") == "done"
+
+    def log():
+        return [shlex.split(c)[2] for c, _ in connection.commands if c.startswith("printf")]
+
+    return run, connection.files, messages, log
+
+
+def test_copy_a_theme_to_another_code(theme_screen):
+    run, files, messages, log = theme_screen
+    run(themes.copy_theme, asks=["0027", "2*2"])
+    assert files["/mnt/usb0/0027.mp3"] == files["/mnt/usb0/2x2.mp3"] == ID3_MP3
+    assert set(files) == {"/mnt/usb0/0027.mp3", "/mnt/usb0/0042.mp3", "/mnt/usb0/2x2.mp3"}
+    assert ("Copied! Now 0027 and 2*2 both play it. Type 2*2 on the entrance keypad to play "
+            "it.") in messages
+    assert any(m.startswith("File names can't have * or /") for m in messages)
+    assert "Copied theme 0027 to 2*2, as 2x2.mp3" in log()[0]
+
+
+def test_copy_a_theme_over_another_keeps_that_one_in_removed(theme_screen):
+    run, files, messages, log = theme_screen
+    run(themes.copy_theme, asks=["0027", "0042"], chooses=["replace"])
+    assert files["/mnt/usb0/0042.mp3"] == ID3_MP3  # 0027's song
+    assert files["/mnt/usb0/removed/0042.mp3"] == b""  # the song 0042 had
+    assert "Theme 0042 is kept as /mnt/usb0/removed/0042.mp3." in messages
+    assert "the theme it replaced is kept as /mnt/usb0/removed/0042.mp3" in log()[-1]
+
+
+def test_copy_needs_a_different_code(theme_screen):
+    run, files, messages, log = theme_screen
+    run(themes.copy_theme, asks=["0099", "0027", "0027", "0043"])  # no 0099; 0027 is its own
+    assert "There's no theme with code 0099. 'List and search themes' shows them." in messages
+    assert "That's the code it has now. Type a different one." in messages
+    assert files["/mnt/usb0/0043.mp3"] == ID3_MP3
+
+
+def test_copy_that_fails_on_the_pi_says_so(theme_screen):
+    run, files, messages, log = theme_screen
+    full = CommandResult(1, "cp: No space left on device")
+    run(lambda pi: (setattr(pi.connection, "result", full), themes.copy_theme(pi)),
+        asks=["0027", "0043"])
+    assert "Couldn't copy it on pi-themes: cp: No space left on device" in messages
+    assert "/mnt/usb0/0043.mp3" not in files
+
+
+def test_change_a_themes_code(theme_screen):
+    run, files, messages, log = theme_screen
+    run(themes.rename_theme, asks=["0027", "3/4"])
+    assert "/mnt/usb0/0027.mp3" not in files
+    assert files["/mnt/usb0/3d4.mp3"] == ID3_MP3
+    assert ("Done! Theme 0027 is now 3/4, and 0027 doesn't play anything. Type 3/4 on the "
+            "entrance keypad to play it.") in messages
+    assert "Changed theme 0027's code to 3/4, as 3d4.mp3" in log()[0]
+
+
+def test_change_a_themes_code_to_one_thats_taken(theme_screen):
+    run, files, messages, log = theme_screen
+    run(themes.rename_theme, asks=["0027", "0042", "0043"], chooses=["different"])
+    assert set(files) == {"/mnt/usb0/0042.mp3", "/mnt/usb0/0043.mp3"}  # 0042 untouched
+
+
+def test_change_a_code_to_the_same_file_name(theme_screen):
+    run, files, messages, log = theme_screen
+    files["/mnt/usb0/2x2.mp3"] = b"two"
+    run(themes.rename_theme, asks=["2x2", "2*2", None])  # 2*2 is 2x2.mp3 too
+    assert "That's the code it has now. Type a different one." in messages
+    assert files["/mnt/usb0/2x2.mp3"] == b"two"
+
+
+def test_replacing_a_theme_when_adding_keeps_the_old_one(add_screen):
+    run, song, files, messages = add_screen
+    run(asks=[song, "", None], chooses=["add", "replace"])  # Enter takes 0027, then q
+    assert files["/mnt/usb0/0027.mp3"] == ID3_MP3
+    assert files["/mnt/usb0/removed/0027.mp3"] == b""  # the one it replaced
 
 
 def test_documentation_needs_no_login(monkeypatch, capsys):
