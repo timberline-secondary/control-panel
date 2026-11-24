@@ -122,17 +122,35 @@ drive. It's worth backing up the drive now and then.
 
 | Menu item | What it does |
 | --- | --- |
-| Add new themes (one or several) | From links to mp3s, or mp3 files dragged into the window: one or several at once, or a folder or `.zip` of them. For each, it checks that it really is an mp3, then: **Add it** (Enter), **Play it on this computer first**, **Use only part of it** (from where, and for how long; it fades in and out), or **Even out its loudness** (so it isn't much louder or quieter than other themes). Trimming and evening out use ffmpeg, downloaded the first time if need be (as for the TVs). Then it suggests the code from the file name; if the code is taken, you can use another code or replace that theme. |
+| Add new themes (one or several) | From links to mp3s, or mp3 files dragged into the window: one or several at once, or a folder or `.zip` of them. For each, it checks that it really is an mp3, then: **Add it** (Enter), **Play it on this computer first**, **Use only part of it** (from where, and for how long; it fades in and out), or **Even out its loudness** (so it isn't much louder or quieter than other themes). Trimming and evening out use ffmpeg, downloaded the first time if need be (as for the TVs). Then it suggests the code from the file name (e.g. `0027.mp3` or `2+2.mp3`; see *Codes* below); if the code is taken, you can use another code or replace that theme. |
 | Remove a theme | Type its code. Then either keep a backup on pi-themes (in `removed/` next to the themes, where the player can't play it), or delete it for good. |
 | Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. It runs its own copy of the player, so spam-block and admin (`*`) codes here don't affect the keypad. Leaving stops anything still playing. |
 | List and search themes | Shows every theme code on the Pi's USB drive, then type part of a code to see only the codes that contain it. |
 | Toggle mute | Mutes the speaker, or unmutes it if it's muted. |
 | Say something (text to speech) | Through the entrance speaker. |
-| Reboot pi-themes | Turns it off and on again. |
+| Reboot pi-themes | Turns it off and on again. When it starts, the player updates itself from GitHub. |
 | Recent changes (who added or removed which themes, and when) | From pi-themes' `activity.log`, in `/home/pi/themes`. |
 | pi-themes documentation | A link to the player, [timberline-secondary/themes](https://github.com/timberline-secondary/themes). |
 
-Nothing on pi-themes needs to change to use this app.
+**Codes:** a code can use every key on the keypad (`0-9 . + - * /`), or letters and `_`
+(which only *Play a theme* can type). A theme's file is its code with `.mp3`: `0027.mp3`,
+`2+2.mp3`, `-1.5.mp3`. But `*` and `/` can't be in a file name (`/` is a folder on the Pi, and
+USB sticks formatted for Windows don't allow `*`), so they're letters in the file name, and
+the player swaps them the same way when a code is typed:
+
+| Key | In the file name | Example |
+| --- | --- | --- |
+| `*` | `x` | `2*2` is saved as `2x2.mp3`; typing `2*2` plays it |
+| `/` | `d` | `3/4` is saved as `3d4.mp3`; typing `3/4` plays it |
+
+The app says so whenever a code has `*` or `/` in it, and lists and searches themes by their
+codes (`2*2`, not `2x2`). A file you add that's named like `2x2.mp3` gets `2*2` as its suggested
+code. Codes can't start with `*`: those are the player's admin codes.
+
+Nothing on pi-themes needs to change to use this app, except that codes with `*` or `/` need
+the player from [timberline-secondary/themes](https://github.com/timberline-secondary/themes)
+that has the swaps. If pi-themes' player doesn't have them yet, adding such a theme says so.
+pi-themes updates its player from GitHub each time it starts, so *Reboot pi-themes* gets it.
 
 ### Check the Pis
 
