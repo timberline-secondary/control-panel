@@ -36,7 +36,14 @@ MAX_MP3_BYTES = 50_000_000
 PLAYER_STARTUP_SECONDS = 30  # importing pygame on a Pi is slow
 PLAYER_READY = "Please enter a code:"  # themes.py prints this when it's waiting for a code
 _PLAYER_NOISE = (PLAYER_READY, "pygame ", "Hello from the pygame community")
-_CODE_PATTERN = re.compile(r"[0-9A-Za-z_-]+")
+_CODE_PATTERN = re.compile(r"[0-9A-Za-z_+\-.*/]+")
+KEYPAD = "0123456789.+-*/"  # the keys on the entrance keypad (a number pad)
+# The player plays <code>.mp3, but * and / can't be in a file name (/ is a folder on the Pi,
+# and USB sticks formatted for Windows don't allow *), so a theme's file name has letters in
+# their place: 2*2 is saved as 2x2.mp3, and 3/4 as 3d4.mp3. themes.py swaps them the same way
+# (its FILE_NAME_SWAPS) when a code is typed, so typing 2*2 plays 2x2.mp3.
+FILE_NAME_SWAPS = {"*": "x", "/": "d"}
+SWAPS_TEXT = ", ".join(f"{key} as {letter}" for key, letter in FILE_NAME_SWAPS.items())
 REMOVED = "removed"  # the folder next to the themes that removed ones are kept in
 
 
@@ -107,13 +114,37 @@ def what_it_is(data: bytes) -> str | None:
 
 
 def suggest_code(filename: str) -> str | None:
-    """'0027.mp3' -> '0027'. Files named after their code are the usual case."""
-    stem = posixpath.splitext(filename)[0]
-    return stem if _is_number(stem) else None
+    """'0027.mp3' -> '0027', '2+2.mp3' -> '2+2', '2x2.mp3' -> '2*2' (see FILE_NAME_SWAPS).
+    Files named after their code are the usual case."""
+    code = code_of(posixpath.splitext(filename)[0])
+    return code if on_keypad(code) and not code_problem(code) else None
 
 
-def _is_number(text: str) -> bool:
-    return text.isascii() and text.isdigit()  # isdigit() alone accepts things like '²'
+def on_keypad(code: str) -> bool:
+    """Whether it can be typed on the entrance keypad."""
+    return bool(code) and all(key in KEYPAD for key in code)  # (not isdigit(), which takes ²)
+
+
+def file_name(code: str) -> str:
+    """The theme's file name: '2+2' -> '2+2.mp3', '2*2' -> '2x2.mp3' (see FILE_NAME_SWAPS)."""
+    return "".join(FILE_NAME_SWAPS.get(key, key) for key in code) + ".mp3"
+
+
+def code_of(stem: str) -> str:
+    """The keypad code a file name (without .mp3) plays for: '2x2' -> '2*2', but 'max' stays
+    'max' (it isn't something typed on the keypad)."""
+    letters = {letter: key for key, letter in FILE_NAME_SWAPS.items()}
+    code = "".join(letters.get(c, c) for c in stem)
+    return code if on_keypad(code) and not code.startswith("*") else stem
+
+
+def swap_note(code: str) -> str | None:
+    """What to say about a code whose file name isn't just the code with .mp3, or None."""
+    if file_name(code) == f"{code}.mp3":
+        return None
+    return (f"File names can't have {' or '.join(FILE_NAME_SWAPS)} in them, so theme {code} "
+            f"is saved as {file_name(code)} ({SWAPS_TEXT}). The player swaps them back when "
+            f"a code is typed, so typing {code} on the keypad plays it.")
 
 
 def code_problem(code: str) -> str | None:
@@ -125,7 +156,7 @@ def code_problem(code: str) -> str | None:
     if code.lower() == "exit":
         return "'exit' is reserved (typing it stops the player)."
     if not _CODE_PATTERN.fullmatch(code):
-        return "Use only numbers (or letters, - and _) in a code."
+        return "Use only the keypad's keys (0-9 . + - * /), or letters and _, in a code."
     return None
 
 
@@ -204,9 +235,9 @@ def tidy_player_line(line: str) -> str | None:
     if not line or line.startswith(_PLAYER_NOISE) or "underrun occurred" in line:
         return None  # an underrun is a hiccup in the sound that it recovers from
     if found := re.fullmatch(r"Found .*/(.+)\.mp3", line):
-        return f"Playing {found[1]}."
+        return f"Playing {code_of(found[1])}."
     if missing := re.fullmatch(r"File '(.+)\.mp3' not found\.", line):
-        return f"There's no theme with code {missing[1]}."
+        return f"There's no theme with code {code_of(missing[1])}."
     return line
 
 
@@ -250,7 +281,7 @@ class ThemesPi:
         activity.record(self.connection, self.log_path(), text)
 
     def theme_path(self, code: str) -> str:
-        return posixpath.join(self.settings.songs_dir, f"{code}.mp3")
+        return posixpath.join(self.settings.songs_dir, file_name(code))
 
     def list_codes(self) -> list[str]:
         try:
@@ -260,7 +291,16 @@ class ThemesPi:
                 f"{self.settings.songs_dir} doesn't exist on {self.settings.host}. "
                 "Is the USB drive with the themes plugged in?"
             ) from e
-        return sort_codes(n[:-4] for n in names if n.endswith(".mp3") and not n.startswith("."))
+        codes = (code_of(n[:-4]) for n in names if n.endswith(".mp3"))
+        # (a code can start with a dot, like .5, but other hidden files aren't themes, like the
+        # ._0027.mp3 that a Mac leaves on a USB stick)
+        return sort_codes(c for c in codes if not c.startswith(".") or on_keypad(c))
+
+    def player_swaps(self) -> bool:
+        """Whether pi-themes' player knows to play 2x2.mp3 when 2*2 is typed (see
+        FILE_NAME_SWAPS). It updates itself from GitHub each time pi-themes starts."""
+        player = posixpath.join(self.settings.player_dir, "themes.py")
+        return self.connection.run(f"grep -q FILE_NAME_SWAPS {shlex.quote(player)}").ok
 
     def has_theme(self, code: str) -> bool:
         return self.connection.exists(self.theme_path(code))
@@ -280,10 +320,11 @@ class ThemesPi:
             return None
         folder = self.removed_folder()
         self.connection.mkdir(folder)
-        backup, copy = posixpath.join(folder, f"{code}.mp3"), 1
+        stem = file_name(code)[:-4]
+        backup, copy = posixpath.join(folder, f"{stem}.mp3"), 1
         while self.connection.exists(backup):  # it was removed before
             copy += 1
-            backup = posixpath.join(folder, f"{code} ({copy}).mp3")
+            backup = posixpath.join(folder, f"{stem} ({copy}).mp3")
         self.connection.rename(path, backup)
         return backup
 
@@ -567,6 +608,8 @@ def _add_one(pi: ThemesPi, name: str, data: bytes, tools: _Tools, work: Path) ->
         ui.success(f"Done{f': it is {clock_text(seconds)} long now' if seconds else ''}. "
                    "(Play it to check.)")
     suggestion = suggest_code(name)
+    if suggestion and (note := swap_note(suggestion)):
+        ui.info(f"{name} is named for the code {suggestion}. {note}")
     while True:
         code = _ask_code(suggestion)
         if code is None:
@@ -588,12 +631,17 @@ def _add_one(pi: ThemesPi, name: str, data: bytes, tools: _Tools, work: Path) ->
     except OSError as e:
         ui.error(f"Couldn't save it on pi-themes: {e}")
         return False
-    pi.log(f"{'Replaced' if replacing else 'Added'} theme {code} ({name}"
+    saved_as = f", as {file_name(code)}" if swap_note(code) else ""
+    pi.log(f"{'Replaced' if replacing else 'Added'} theme {code} ({name}{saved_as}"
            + (f", {', '.join(edits)}" if edits else "") + ")")
-    if _is_number(code):
+    if on_keypad(code):
         ui.success(f"Added! Type {code} on the entrance keypad to play it.")
     else:
         ui.success(f"Added! Play it by typing {code} in 'Play a theme'.")
+    if swap_note(code) and not pi.player_swaps():  # (the note was shown when the code was)
+        ui.warning(f"pi-themes' player doesn't swap them back yet, so typing {code} won't "
+                   "play it until the player is updated. It updates itself from GitHub when "
+                   "pi-themes starts: once the new player is on GitHub, use 'Reboot pi-themes'.")
     return True
 
 
@@ -666,8 +714,10 @@ def _ask_code(suggestion: str | None) -> str | None:
         if problem := code_problem(code):
             ui.error(problem)
             continue
-        if _is_number(code) or ui.confirm(
-            f"'{code}' can't be typed on the entrance keypad (it only has numbers). "
+        if code != suggestion and (note := swap_note(code)):
+            ui.info(note)
+        if on_keypad(code) or ui.confirm(
+            f"'{code}' can't be typed on the entrance keypad (it only has 0-9 . + - * /). "
             "Use it anyway?", default=False
         ):
             return code

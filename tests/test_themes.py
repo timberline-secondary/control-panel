@@ -59,6 +59,10 @@ def test_what_it_is(data, kind):
     ("my song.mp3", None),
     ("12a.mp3", None),
     ("\u00b2.mp3", None),  # '²'.isdigit() is True, but it's not a code
+    ("2+2.mp3", "2+2"), ("-1.5.mp3", "-1.5"),  # every key on the keypad
+    ("2x2.mp3", "2*2"), ("3d4.mp3", "3/4"),  # how 2*2 and 3/4 are saved
+    ("x5.mp3", None),  # *5 would be an admin code
+    ("max.mp3", None),
 ])
 def test_suggest_code(name, expected):
     assert themes.suggest_code(name) == expected
@@ -67,10 +71,24 @@ def test_suggest_code(name, expected):
 @pytest.mark.parametrize("code, ok", [
     ("0027", True), ("abc", True), ("a-b_c", True),
     ("", False), ("*0000", False), ("exit", False), ("EXIT", False),
-    ("12 34", False), ("../etc", False), ("a/b", False),
+    ("12 34", False), ("2#2", False), ("2+2", True), ("2*2", True), ("3/4", True), (".5", True),
+    ("../etc", True),  # (saved as ..detc.mp3: / is never a folder in a theme's file name)
 ])
 def test_code_problem(code, ok):
     assert (themes.code_problem(code) is None) is ok
+
+
+@pytest.mark.parametrize("code, name", [
+    ("0027", "0027.mp3"), ("2+2", "2+2.mp3"), ("-1.5", "-1.5.mp3"),
+    ("2*2", "2x2.mp3"), ("3/4", "3d4.mp3"), ("*/", None),
+])
+def test_file_names_for_keypad_codes(code, name):
+    if name:
+        assert themes.file_name(code) == name
+        assert themes.code_of(name[:-4]) == code  # and back again, e.g. when listing them
+    assert themes.code_of("max") == "max"  # not typed on the keypad, so not swapped back
+    assert themes.code_of("x") == "x"  # * would be an admin code
+    assert (themes.swap_note(code) is not None) is ("*" in code or "/" in code)
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -190,6 +208,8 @@ def test_read_mp3_link_to_another_kind_of_audio(monkeypatch):
     ("> ", None),
     ("> Found /mnt/usb0//0027.mp3\r", "Playing 0027."),
     ("File '9.mp3' not found.", "There's no theme with code 9."),
+    ("> Found /mnt/usb0/2x2.mp3", "Playing 2*2."),
+    ("File '3d4.mp3' not found.", "There's no theme with code 3/4."),
     ("ALSA lib pcm.c:8545:(snd_pcm_recover) underrun occurred", None),
     ("Spam block is now set to 5", "Spam block is now set to 5"),
     ("pygame 2.1.0 (SDL 2.0.16, Python 3.9.2)", None),
@@ -267,6 +287,11 @@ def make_pi(**kwargs):
 def test_list_codes_only_shows_playable_themes():
     pi, _ = make_pi(files=["0027.mp3", "100.mp3", "notes.txt", ".0099.mp3.part", "5.MP3"])
     assert pi.list_codes() == ["0027", "100"]
+
+
+def test_list_codes_shows_keypad_codes():
+    pi, _ = make_pi(files=["2x2.mp3", "3d4.mp3", "2+2.mp3", ".5.mp3", "._0027.mp3", "max.mp3"])
+    assert pi.list_codes() == [".5", "2*2", "2+2", "3/4", "max"]  # not the Mac's ._0027
 
 
 def test_list_codes_without_usb_drive():
@@ -418,6 +443,39 @@ def test_after_adding_a_theme_it_asks_for_the_next_one(add_screen):
                      "To add more, paste a link or drag mp3 files into this window"]
 
 
+def test_add_a_theme_with_a_code_that_cant_be_a_file_name(add_screen):
+    run, song, files, messages = add_screen
+    run(asks=[song, "2*2", None], chooses=["add"])
+    assert files["/mnt/usb0/2x2.mp3"] == ID3_MP3
+    note = ("File names can't have * or / in them, so theme 2*2 is saved as 2x2.mp3 (* as x, "
+            "/ as d). The player swaps them back when a code is typed, so typing 2*2 on the "
+            "keypad plays it.")
+    assert messages.count(note) == 1  # when it's typed
+    assert "Added! Type 2*2 on the entrance keypad to play it." in messages
+    assert not any("doesn't swap them back yet" in m for m in messages)  # (the player does)
+    commands = [command for command, sudo in run.pi.connection.commands]
+    assert "grep -q FILE_NAME_SWAPS /home/pi/themes/themes.py" in commands
+
+
+def test_adding_2x2_mp3_suggests_2_times_2(add_screen, tmp_path):
+    run, song, files, messages = add_screen
+    named = tmp_path / "2x2.mp3"
+    named.write_bytes(ID3_MP3)
+    run(asks=[str(named), "", None], chooses=["add"])  # Enter takes the suggested 2*2
+    assert files["/mnt/usb0/2x2.mp3"] == ID3_MP3
+    assert any(m.startswith("2x2.mp3 is named for the code 2*2. File names can't")
+               for m in messages)
+
+
+def test_adding_2_times_2_says_when_the_player_needs_updating(add_screen):
+    run, song, files, messages = add_screen
+    run.pi.connection.result = CommandResult(1, "")  # its themes.py doesn't have the swaps
+    run(asks=[song, "3/4", None], chooses=["add"])
+    assert files["/mnt/usb0/3d4.mp3"] == ID3_MP3
+    assert any(m.startswith("pi-themes' player doesn't swap them back yet, so typing 3/4 won't")
+               for m in messages)
+
+
 def test_add_theme_with_a_different_code_after_a_clash(add_screen):
     run, song, files, messages = add_screen
     run(asks=[song, "", "0042", None], chooses=["add", "different"])
@@ -523,6 +581,13 @@ def test_removing_a_theme_again_keeps_both_backups(remove_screen):
     run(asks=["0027"], chooses=["backup"])
     assert files["/mnt/usb0/removed/0027.mp3"] == b"older"
     assert files["/mnt/usb0/removed/0027 (2).mp3"] == ID3_MP3
+
+
+def test_remove_a_theme_saved_with_a_swapped_name(remove_screen):
+    run, files, messages = remove_screen
+    files["/mnt/usb0/2x2.mp3"] = ID3_MP3
+    run(asks=["2*2"], chooses=["backup"])
+    assert files["/mnt/usb0/removed/2x2.mp3"] == ID3_MP3 and "/mnt/usb0/2x2.mp3" not in files
 
 
 def test_delete_a_theme_for_good(remove_screen):
