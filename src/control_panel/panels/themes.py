@@ -308,6 +308,21 @@ class ThemesPi:
     def add_theme(self, code: str, data: bytes) -> None:
         self.connection.upload(io.BytesIO(data), self.theme_path(code))
 
+    def copy_theme(self, code: str, new_code: str) -> None:
+        """Copy a theme so new_code plays it too (on the Pi itself: nothing comes here).
+        Copied under a temporary name first, so the player never sees half a file."""
+        partial = posixpath.join(self.settings.songs_dir, f".{file_name(new_code)}.part")
+        result = self.connection.run(f"cp -- {shlex.quote(self.theme_path(code))} "
+                                     f"{shlex.quote(partial)}")
+        if not result.ok:
+            self.connection.run(f"rm -f -- {shlex.quote(partial)}")
+            raise ThemeError(f"Couldn't copy it on pi-themes: {result.output.strip()}")
+        self.connection.rename(partial, self.theme_path(new_code))
+
+    def rename_theme(self, code: str, new_code: str) -> None:
+        """Give a theme a new code: new_code plays it, and code doesn't any more."""
+        self.connection.rename(self.theme_path(code), self.theme_path(new_code))
+
     def removed_folder(self) -> str:
         return posixpath.join(self.settings.songs_dir, REMOVED)
 
@@ -610,39 +625,75 @@ def _add_one(pi: ThemesPi, name: str, data: bytes, tools: _Tools, work: Path) ->
     suggestion = suggest_code(name)
     if suggestion and (note := swap_note(suggestion)):
         ui.info(f"{name} is named for the code {suggestion}. {note}")
-    while True:
-        code = _ask_code(suggestion)
-        if code is None:
-            return False
-        if not pi.has_theme(code):
-            break
-        choice = ui.choose([
-            ui.choice("Use a different code", "different"),
-            ui.choice("Replace it", "replace"),
-        ], f"There's already a theme with code {code}.")
-        if choice is None:
-            return False
-        if choice == "replace":
-            break
-        suggestion = None
+    code = _ask_new_code(pi, suggestion)
+    if code is None:
+        return False
     try:
-        replacing = pi.has_theme(code)
+        replaced = _set_aside(pi, code)
         pi.add_theme(code, data)
     except OSError as e:
         ui.error(f"Couldn't save it on pi-themes: {e}")
         return False
-    saved_as = f", as {file_name(code)}" if swap_note(code) else ""
-    pi.log(f"{'Replaced' if replacing else 'Added'} theme {code} ({name}{saved_as}"
-           + (f", {', '.join(edits)}" if edits else "") + ")")
-    if on_keypad(code):
-        ui.success(f"Added! Type {code} on the entrance keypad to play it.")
-    else:
-        ui.success(f"Added! Play it by typing {code} in 'Play a theme'.")
+    pi.log(f"{'Replaced' if replaced else 'Added'} theme {code} ({name}{_saved_as(code)}"
+           + (f", {', '.join(edits)}" if edits else "") + ")" + _kept(replaced))
+    ui.success(f"Added! {_how_to_play(code)}")
+    _warn_if_player_is_old(pi, code)
+    return True
+
+
+def _how_to_play(code: str) -> str:
+    return (f"Type {code} on the entrance keypad to play it." if on_keypad(code) else
+            f"Play it by typing {code} in 'Play a theme'.")
+
+
+def _saved_as(code: str) -> str:
+    return f", as {file_name(code)}" if swap_note(code) else ""
+
+
+def _kept(backup: str | None) -> str:
+    return f"; the theme it replaced is kept as {backup}" if backup else ""
+
+
+def _warn_if_player_is_old(pi: ThemesPi, code: str) -> None:
     if swap_note(code) and not pi.player_swaps():  # (the note was shown when the code was)
         ui.warning(f"pi-themes' player doesn't swap them back yet, so typing {code} won't "
                    "play it until the player is updated. It updates itself from GitHub when "
                    "pi-themes starts: once the new player is on GitHub, use 'Reboot pi-themes'.")
-    return True
+
+
+def _ask_new_code(pi: ThemesPi, suggestion: str | None, now: str | None = None,
+                  prompt: str = "Type the keypad code that should play it") -> str | None:
+    """The code a theme should have. If another theme has it, they can use a different code
+    or replace that theme (which is then kept in removed/, as by 'Remove a theme')."""
+    while True:
+        code = _ask_code(suggestion, prompt)
+        if code is None:
+            return None
+        if now is not None and file_name(code) == file_name(now):
+            ui.error("That's the code it has now. Type a different one.")
+            suggestion = None
+            continue
+        if not pi.has_theme(code):
+            return code
+        choice = ui.choose([
+            ui.choice("Use a different code", "different"),
+            ui.choice(f"Replace it (theme {code} is kept in {pi.removed_folder()})", "replace"),
+        ], f"There's already a theme with code {code}.")
+        if choice is None:
+            return None
+        if choice == "replace":
+            return code
+        suggestion = None
+
+
+def _set_aside(pi: ThemesPi, code: str) -> str | None:
+    """Move the theme with this code (if there is one) to removed/, before another takes its
+    code. Returns where it went."""
+    if not pi.has_theme(code):
+        return None
+    backup = pi.remove_theme(code, keep_backup=True)
+    ui.info(f"Theme {code} is kept as {backup}.")
+    return backup
 
 
 def _ask_part(seconds: float | None) -> tuple[float, float | None] | None:
@@ -668,19 +719,68 @@ def _ask_part(seconds: float | None) -> tuple[float, float | None] | None:
         ui.error("Type how long, like 15 or 0:20.")
 
 
-def remove_theme(pi: ThemesPi) -> None:
+def _ask_existing_code(pi: ThemesPi, prompt: str) -> str | None:
+    """The code of a theme that's on pi-themes."""
     while True:
-        code = ui.ask("Type the code of the theme to remove")
+        code = ui.ask(prompt)
         if code is None:
-            return
+            return None
         if not code:
             continue
         if problem := code_problem(code):
             ui.error(problem)
         elif pi.has_theme(code):
-            break
+            return code
         else:
             ui.error(f"There's no theme with code {code}. 'List and search themes' shows them.")
+
+
+def copy_theme(pi: ThemesPi) -> None:
+    code = _ask_existing_code(pi, "Type the code of the theme to copy")
+    if code is None:
+        return
+    new = _ask_new_code(pi, None, now=code,
+                        prompt=f"Type the new code that should play it too (as well as {code})")
+    if new is None:
+        return
+    try:
+        replaced = _set_aside(pi, new)
+        pi.copy_theme(code, new)
+    except ThemeError as e:
+        ui.error(str(e))
+        return
+    except OSError as e:
+        ui.error(f"Couldn't copy it on pi-themes: {e}")
+        return
+    pi.log(f"Copied theme {code} to {new}{_saved_as(new)}{_kept(replaced)}")
+    ui.success(f"Copied! Now {code} and {new} both play it. {_how_to_play(new)}")
+    _warn_if_player_is_old(pi, new)
+
+
+def rename_theme(pi: ThemesPi) -> None:
+    code = _ask_existing_code(pi, "Type the code of the theme to give a new code")
+    if code is None:
+        return
+    new = _ask_new_code(pi, None, now=code,
+                        prompt=f"Type its new code (instead of {code})")
+    if new is None:
+        return
+    try:
+        replaced = _set_aside(pi, new)
+        pi.rename_theme(code, new)
+    except OSError as e:
+        ui.error(f"Couldn't rename it on pi-themes: {e}")
+        return
+    pi.log(f"Changed theme {code}'s code to {new}{_saved_as(new)}{_kept(replaced)}")
+    ui.success(f"Done! Theme {code} is now {new}, and {code} doesn't play anything. "
+               f"{_how_to_play(new)}")
+    _warn_if_player_is_old(pi, new)
+
+
+def remove_theme(pi: ThemesPi) -> None:
+    code = _ask_existing_code(pi, "Type the code of the theme to remove")
+    if code is None:
+        return
     how = ui.choose([
         ui.choice(f"Remove it, and keep a backup on pi-themes (in {pi.removed_folder()})",
                   "backup"),
@@ -705,9 +805,10 @@ def recent_changes(pi: ThemesPi) -> None:
     activity.show(pi.connection, pi.log_path())
 
 
-def _ask_code(suggestion: str | None) -> str | None:
+def _ask_code(suggestion: str | None,
+              prompt: str = "Type the keypad code that should play it") -> str | None:
     while True:
-        code = ui.ask("Type the keypad code that should play it", default=suggestion or "")
+        code = ui.ask(prompt, default=suggestion or "")
         if code is None:
             return None
         code = code or suggestion or ""
@@ -775,13 +876,16 @@ def docs() -> None:
 
 ACTIONS = [
     ("Add new themes (one or several)", add_theme),
+    ("Copy a theme to another code (so both codes play it)", copy_theme),
+    ("Change a theme's code (rename it)", rename_theme),
     ("Remove a theme", remove_theme),
     ("Play a theme", play),
     ("List and search themes", list_themes),
     ("Toggle mute", toggle_mute),
     ("Say something (text to speech)", speak),
     ("Reboot pi-themes", reboot),
-    ("Recent changes (who added or removed which themes, and when)", recent_changes),
+    ("Recent changes (who added, changed or removed which themes, and when)",
+     recent_changes),
     ("pi-themes documentation", docs),
 ]
 

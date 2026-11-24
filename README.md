@@ -122,14 +122,16 @@ drive. It's worth backing up the drive now and then.
 
 | Menu item | What it does |
 | --- | --- |
-| Add new themes (one or several) | From links to mp3s, or mp3 files dragged into the window: one or several at once, or a folder or `.zip` of them. For each, it checks that it really is an mp3, then: **Add it** (Enter), **Play it on this computer first**, **Use only part of it** (from where, and for how long; it fades in and out), or **Even out its loudness** (so it isn't much louder or quieter than other themes). Trimming and evening out use ffmpeg, downloaded the first time if need be (as for the TVs). Then it suggests the code from the file name (e.g. `0027.mp3` or `2+2.mp3`; see *Codes* below); if the code is taken, you can use another code or replace that theme. |
+| Add new themes (one or several) | From links to mp3s, or mp3 files dragged into the window: one or several at once, or a folder or `.zip` of them. For each, it checks that it really is an mp3, then: **Add it** (Enter), **Play it on this computer first**, **Use only part of it** (from where, and for how long; it fades in and out), or **Even out its loudness** (so it isn't much louder or quieter than other themes). Trimming and evening out use ffmpeg, downloaded the first time if need be (as for the TVs). Then it suggests the code from the file name (e.g. `0027.mp3` or `2+2.mp3`; see *Codes* below); if the code is taken, you can use another code or replace that theme (which is then kept in `removed/`, as *Remove a theme* does). |
+| Copy a theme to another code (so both codes play it) | Type the theme's code, then the new one. The song is copied on pi-themes itself (nothing comes to this computer), so both codes play it. If the new code is taken, you can use another or replace that theme (kept in `removed/`). |
+| Change a theme's code (rename it) | Type the theme's code, then its new one. The new code plays it, and the old one doesn't play anything any more. If the new code is taken, as for *Copy*. |
 | Remove a theme | Type its code. Then either keep a backup on pi-themes (in `removed/` next to the themes, where the player can't play it), or delete it for good. |
 | Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. It runs its own copy of the player, so spam-block and admin (`*`) codes here don't affect the keypad. Leaving stops anything still playing. |
 | List and search themes | Shows every theme code on the Pi's USB drive, then type part of a code to see only the codes that contain it. |
 | Toggle mute | Mutes the speaker, or unmutes it if it's muted. |
 | Say something (text to speech) | Through the entrance speaker. |
 | Reboot pi-themes | Turns it off and on again. When it starts, the player updates itself from GitHub. |
-| Recent changes (who added or removed which themes, and when) | From pi-themes' `activity.log`, in `/home/pi/themes`. |
+| Recent changes (who added, changed or removed which themes, and when) | From pi-themes' `activity.log`, in `/home/pi/themes`. |
 | pi-themes documentation | A link to the player, [timberline-secondary/themes](https://github.com/timberline-secondary/themes). |
 
 **Codes:** a code can use every key on the keypad (`0-9 . + - * /`), or letters and `_`
