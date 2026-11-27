@@ -127,6 +127,7 @@ drive. It's worth backing up the drive now and then.
 | Change a theme's code (rename it) | Type the theme's code, then its new one. The new code plays it, and the old one doesn't play anything any more. If the new code is taken, as for *Copy*. |
 | Remove a theme | Type its code. Then either keep a backup on pi-themes (in `removed/` next to the themes, where the player can't play it), or delete it for good. |
 | Play a theme | Type codes to play themes on the entrance speaker, just like the keypad. It runs its own copy of the player, so spam-block and admin (`*`) codes here don't affect the keypad. Leaving stops anything still playing. |
+| Watch the keypad (live: the codes typed, and what they played) | The latest 20 codes typed on the entrance keypad, then each new one as it's typed, with the time and what happened: which file it played, not found (and the file it looked for), spam-blocked (for how long), or what an admin code did (admin codes themselves show as `(admin)`). Codes from *Play a theme* say `(not the keypad)`. Press Enter to stop. It follows `keypad.log`, which the player in [timberline-secondary/themes](https://github.com/timberline-secondary/themes) writes; with an older player it says it needs updating (a reboot of pi-themes gets it). |
 | List and search themes | Shows every theme code on the Pi's USB drive, then type part of a code to see only the codes that contain it. |
 | Toggle mute | Mutes the speaker, or unmutes it if it's muted. |
 | Say something (text to speech) | Through the entrance speaker. |

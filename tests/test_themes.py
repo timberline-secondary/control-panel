@@ -629,6 +629,7 @@ def test_the_menu_is_in_the_asked_for_order():
         "Add new themes (one or several)",
         "Copy a theme to another code (so both codes play it)",
         "Change a theme's code (rename it)", "Remove a theme", "Play a theme",
+        "Watch the keypad (live: the codes typed, and what they played)",
         "List and search themes", "Toggle mute", "Say something (text to speech)",
         "Reboot pi-themes",
         "Recent changes (who added, changed or removed which themes, and when)",
@@ -731,3 +732,75 @@ def test_documentation_needs_no_login(monkeypatch, capsys):
     monkeypatch.setattr(themes.login, "connect", lambda settings: pytest.fail("logged in"))
     themes._do(themes.docs, themes.ThemesSettings())
     assert "https://github.com/timberline-secondary/themes" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("2026-11-27 10:31:02  keypad  2*2           played 2x2.mp3\r",
+     "10:31:02  2*2         played 2x2.mp3"),
+    ("2026-11-26 16:00:00  keypad  9/9           not found (there's no 9d9.mp3)",
+     "2026-11-26 16:00:00  9/9         not found (there's no 9d9.mp3)"),  # not today
+    ("2026-11-27 10:35:00  ssh     0027          played 0027.mp3",
+     "10:35:00  0027        played 0027.mp3  (not the keypad)"),
+    ("2026-11-27 10:36:00  keypad  (admin)       spam block set to 7 minutes",
+     "10:36:00  (admin)     spam block set to 7 minutes"),
+    ("tail: something odd", "tail: something odd"),  # not a line it wrote: as it is
+    ("\r", None),
+])
+def test_tidy_keypad_line(line, expected):
+    assert themes.tidy_keypad_line(line, "2026-11-27") == expected
+
+
+def test_keypad_watch_shows_each_line_until_stopped():
+    channel, shown = FakeChannel(), []
+    watch = themes.KeypadWatch(channel, show=shown.append)
+    channel.incoming.put(b"first\r\nsec")
+    channel.incoming.put(b"ond\r\n")
+    deadline = threading.Event()
+    for _ in range(50):
+        if len(shown) == 2:
+            break
+        deadline.wait(0.05)
+    watch.stop()
+    assert shown == ["first\r", "second\r"]
+
+
+@pytest.fixture
+def watch_screen(monkeypatch):
+    """Runs 'Watch the keypad'. Returns (pi, connection, channel, shown messages)."""
+    pi, connection = make_pi()
+    channel, shown = FakeChannel(), []
+    for kind in ["success", "info", "warning", "error"]:
+        monkeypatch.setattr(themes.ui, kind, lambda text, kind=kind: shown.append((kind, text)))
+    monkeypatch.setattr(connection, "start", lambda command: (
+        connection.commands.append((command, False)), channel)[1])
+    return pi, connection, channel, shown
+
+
+def test_watch_the_keypad(watch_screen, monkeypatch):
+    pi, connection, channel, shown = watch_screen
+    connection.files["/home/pi/themes/keypad.log"] = b""
+    today = themes.datetime.date.today().isoformat()
+
+    def press_enter_once_shown(prompt):  # the codes arrive while they're watching
+        channel.incoming.put(f"{today} 10:31:02  keypad  2*2  played 2x2.mp3\r\n".encode())
+        for _ in range(50):
+            if any("2*2" in text for _, text in shown):
+                break
+            threading.Event().wait(0.05)
+
+    monkeypatch.setattr(themes.ui, "pause", press_enter_once_shown)
+    themes.watch_keypad(pi)
+    commands = [c for c, _ in connection.commands]
+    assert commands == ["grep -q KEYPAD_LOG /home/pi/themes/themes.py",
+                        "tail -n 20 -F /home/pi/themes/keypad.log 2>/dev/null"]
+    assert ("info", "  10:31:02  2*2         played 2x2.mp3") in shown
+
+
+def test_watch_the_keypad_with_an_old_player(watch_screen, monkeypatch):
+    pi, connection, channel, shown = watch_screen
+    connection.result = CommandResult(1, "")  # its themes.py doesn't have KEYPAD_LOG
+    monkeypatch.setattr(themes.ui, "pause", lambda prompt: pytest.fail("shouldn't watch"))
+    themes.watch_keypad(pi)
+    assert shown[0][0] == "warning" and "doesn't note the codes typed yet" in shown[0][1]
+    assert [c for c, _ in connection.commands] == [
+        "grep -q KEYPAD_LOG /home/pi/themes/themes.py"]  # nothing started

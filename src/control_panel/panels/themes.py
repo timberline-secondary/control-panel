@@ -9,6 +9,7 @@ to change.
 from __future__ import annotations
 
 import codecs
+import datetime
 import http.client
 import io
 import posixpath
@@ -45,6 +46,8 @@ KEYPAD = "0123456789.+-*/"  # the keys on the entrance keypad (a number pad)
 FILE_NAME_SWAPS = {"*": "x", "/": "d"}
 SWAPS_TEXT = ", ".join(f"{key} as {letter}" for key, letter in FILE_NAME_SWAPS.items())
 REMOVED = "removed"  # the folder next to the themes that removed ones are kept in
+KEYPAD_LOG = "keypad.log"  # themes.py notes each code typed here, next to itself
+WATCH_LINES = 20  # how many of the latest codes 'Watch the keypad' shows first
 
 
 class ThemeError(Exception):
@@ -241,6 +244,17 @@ def tidy_player_line(line: str) -> str | None:
     return line
 
 
+def tidy_keypad_line(line: str, today: str) -> str | None:
+    """A line of themes.py's keypad.log, to show: '2026-11-27 10:31:02  keypad  2*2  played
+    2x2.mp3' -> '10:31:02  2*2  played 2x2.mp3' (with the date if it isn't today)."""
+    parts = line.strip().split(None, 4)
+    if len(parts) < 5 or not re.fullmatch(r"\d{4}-\d\d-\d\d", parts[0]):
+        return line.strip() or None  # (not a line it wrote: shown as it is)
+    date, time, source, code, what = parts
+    when = time if date == today else f"{date} {time}"
+    return f"{when}  {code:<10}  {what}" + ("" if source == "keypad" else "  (not the keypad)")
+
+
 def parse_volume(amixer_output: str) -> int | None:
     match = re.search(r"\[(\d+)%\]", amixer_output)
     return int(match.group(1)) if match else None
@@ -322,6 +336,20 @@ class ThemesPi:
     def rename_theme(self, code: str, new_code: str) -> None:
         """Give a theme a new code: new_code plays it, and code doesn't any more."""
         self.connection.rename(self.theme_path(code), self.theme_path(new_code))
+
+    def keypad_log(self) -> str:
+        return posixpath.join(self.settings.player_dir, KEYPAD_LOG)
+
+    def player_logs_codes(self) -> bool:
+        """Whether pi-themes' player notes the codes typed in keypad.log (newer ones do)."""
+        player = posixpath.join(self.settings.player_dir, "themes.py")
+        return self.connection.run(f"grep -q KEYPAD_LOG {shlex.quote(player)}").ok
+
+    def watch_keypad(self) -> paramiko.Channel:
+        """Follow keypad.log: its latest lines, then each new one as it's written. Closing the
+        channel stops it."""
+        return self.connection.start(
+            f"tail -n {WATCH_LINES} -F {shlex.quote(self.keypad_log())} 2>/dev/null")
 
     def removed_folder(self) -> str:
         return posixpath.join(self.settings.songs_dir, REMOVED)
@@ -418,6 +446,34 @@ class PlayerSession:
                 self.show("(the theme player has stopped - press Enter)")
 
 
+class KeypadWatch:
+    """Passes each line from ThemesPi.watch_keypad() to `show`, until stopped."""
+
+    def __init__(self, channel: paramiko.Channel, show: Callable[[str], None]):
+        self.channel = channel
+        self.show = show
+        self._stopping = False
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+
+    def stop(self) -> None:
+        self._stopping = True
+        self.channel.close()
+        self._reader.join(timeout=5)
+
+    def _read(self) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending = ""
+        try:
+            while data := self.channel.recv(4096):
+                *lines, pending = (pending + decoder.decode(data)).split("\n")
+                for line in lines:
+                    if not self._stopping:
+                        self.show(line)
+        except (OSError, EOFError):
+            pass
+
+
 # --- Menu actions --------------------------------------------------------------------------
 
 def play(pi: ThemesPi) -> None:
@@ -442,6 +498,29 @@ def play(pi: ThemesPi) -> None:
                 session.send(code)
     finally:
         session.stop()
+
+
+def watch_keypad(pi: ThemesPi) -> None:
+    if not pi.player_logs_codes():
+        ui.warning("pi-themes' player doesn't note the codes typed yet, so there's nothing to "
+                   "watch. Newer players do: it updates itself from GitHub when pi-themes "
+                   "starts, so once the update is on GitHub, use 'Reboot pi-themes'.")
+        return
+    if not pi.connection.exists(pi.keypad_log()):
+        ui.info("No codes have been typed since the player started noting them.")
+    ui.info("The latest codes typed on the entrance keypad, then each new one as it's typed "
+            "(admin codes show as (admin), with what they did):")
+    today = datetime.date.today().isoformat()
+
+    def show(line: str) -> None:
+        if tidy := tidy_keypad_line(line, today):
+            ui.info(f"  {tidy}")
+
+    watch = KeypadWatch(pi.watch_keypad(), show)
+    try:
+        ui.pause("Watching... press Enter to stop.")
+    finally:
+        watch.stop()
 
 
 def speak(pi: ThemesPi) -> None:
@@ -880,6 +959,7 @@ ACTIONS = [
     ("Change a theme's code (rename it)", rename_theme),
     ("Remove a theme", remove_theme),
     ("Play a theme", play),
+    ("Watch the keypad (live: the codes typed, and what they played)", watch_keypad),
     ("List and search themes", list_themes),
     ("Toggle mute", toggle_mute),
     ("Say something (text to speech)", speak),
